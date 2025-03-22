@@ -89,6 +89,7 @@ using namespace lldb_private;
 using namespace lldb_private::dwarf;
 using namespace lldb_private::plugin::dwarf;
 using namespace clang;
+// using namespace llvm::dwarf;
 using llvm::StringSwitch;
 
 LLDB_PLUGIN_DEFINE(TypeSystemClang)
@@ -111,7 +112,6 @@ TypeSystemClangSupportsLanguage(lldb::LanguageType language) {
          lldb_private::Language::LanguageIsObjC(language) ||
          lldb_private::Language::LanguageIsPascal(language) ||
          // Use Clang for Rust until there is a proper language plugin for it
-         language == eLanguageTypeRust ||
          // Use Clang for D until there is a proper language plugin for it
          language == eLanguageTypeD ||
          // Open Dylan compiler debug info is designed to be Clang-compatible

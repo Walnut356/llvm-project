@@ -1,0 +1,14 @@
+BasedOnStyle: LLVM
+# Idk why these aren't default. Packing arguments when they split lines
+# is absolutely attrocious for readability, especially if you use IDE
+# inline hints. I'm not gonna bother formatting the whole project like
+# this obviously, but for this module we'll stick with the Rust style.
+AllowAllArgumentsOnNextLine: false
+AllowAllParametersOfDeclarationOnNextLine: false
+AllowShortEnumsOnASingleLine: false
+AlignAfterOpenBracket: BlockIndent
+BinPackArguments: false
+# BinPackLongBracedList: false
+BinPackParameters: false
+# Pointers are part of the type, idk why people put them anywhere else
+PointerAlignment: Left

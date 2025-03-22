@@ -176,6 +176,8 @@ Status TargetThreadWindows::DoResume() {
 }
 
 const char *TargetThreadWindows::GetName() {
+  // TODO temporary override because it was crashing things before
+  return "";
   Log *log = GetLog(LLDBLog::Thread);
   static GetThreadDescriptionFunctionPtr GetThreadDescription = []() {
     HMODULE hModule = ::LoadLibraryW(L"Kernel32.dll");

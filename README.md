@@ -1,3 +1,9 @@
+# rust-lldb
+
+This is a fork of LLDB containing a WIP `TypeSystemRust` implementation.
+
+Currently only tested on Windows 10. At the moment, only supports debugging targets with DWARF debug info (i.e. non-MSVC targets)
+
 # The LLVM Compiler Infrastructure
 
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/llvm/llvm-project/badge)](https://securityscorecards.dev/viewer/?uri=github.com/llvm/llvm-project)

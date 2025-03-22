@@ -23,6 +23,6 @@ CommandObjectVersion::CommandObjectVersion(CommandInterpreter &interpreter)
 CommandObjectVersion::~CommandObjectVersion() = default;
 
 void CommandObjectVersion::DoExecute(Args &args, CommandReturnObject &result) {
-  result.AppendMessageWithFormat("%s\n", lldb_private::GetVersion());
+  result.AppendMessageWithFormat("%s\n-rustlldb", lldb_private::GetVersion());
   result.SetStatus(eReturnStatusSuccessFinishResult);
 }
