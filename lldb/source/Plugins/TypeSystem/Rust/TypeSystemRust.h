@@ -140,8 +140,35 @@ namespace lldb_private {
 //                                                                            //
 //                                                                            //
 // -------------------------------------------------------------------------- //
-//                                                                            //
+
+
 // so stupid
+
+/// Wrapper around RustDecl and RustDecl context
+///
+/// RustDecl and RustDeclContext are the same size, so using std::variant
+/// doesn't waste space on either variant.
+///
+/// In rust terms:
+///
+/// ```
+/// enum RustDeclBase {
+///   RustDecl {
+///     type: CompilerType,
+///     name: ConstString,
+///     mangled: ConstString,
+///     full_name: ConstString,
+///     parent: *const RustDeclBase::RustDeclContext
+///   },
+///   RustDeclContext {
+///     child_decls: HashMap<ConstString, Arc<RustDeclBase>>,
+///     name: ConstString,
+///     mangled: ConstString,
+///     parent: *const RustDeclBase::RustDeclContext
+///   }
+///
+/// }
+/// ```
 struct RustDeclBase;
 
 /// TODO docs
@@ -235,31 +262,7 @@ struct RustDecl {
   }
 };
 
-/// Wrapper around RustDecl and RustDecl context
-///
-/// RustDecl and RustDeclContext are the same size, so using std::variant
-/// doesn't waste space on either variant.
-///
-/// In rust terms:
-///
-/// ```
-/// enum RustDeclBase {
-///   RustDecl {
-///     type: CompilerType,
-///     name: ConstString,
-///     mangled: ConstString,
-///     full_name: ConstString,
-///     parent: *const RustDeclBase::RustDeclContext
-///   },
-///   RustDeclContext {
-///     child_decls: HashMap<ConstString, Arc<RustDeclBase>>,
-///     name: ConstString,
-///     mangled: ConstString,
-///     parent: *const RustDeclBase::RustDeclContext
-///   }
-///
-/// }
-/// ```
+
 struct RustDeclBase {
 public:
   enum Kind {
@@ -1590,7 +1593,7 @@ public:
   ) override;
 
   /// Function Types are still dispatched to ParseTypeFromDWARF, this mostly
-  /// handles Decls and DeclContexts 
+  /// handles Decls and DeclContexts
   Function* ParseFunctionFromDWARF(
       CompileUnit& comp_unit,
       const plugin::dwarf::DWARFDIE& die,
@@ -1710,6 +1713,8 @@ public:
   );
 
   void PrintDeclContexts();
+
+  SymbolFile* GetSymbolFile() {return m_sym_file;};
 
 private:
   uint64_t m_pointer_byte_size;
