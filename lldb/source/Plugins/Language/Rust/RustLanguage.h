@@ -33,6 +33,22 @@ namespace lldb_private {
 
 class RustLanguage : public Language {
 public:
+  // used for some stupid trickery
+  // long story short, synthetics can only be added via exact name match, regex,
+  // or a python script. The gaping hole in that list is "a c++ callback that
+  // can actually access `RustType` internals". Sum-types cannot be
+  // distinguished from regular structs by name alone. We can technically do a
+  // wildcard regex and just check everything in the synthetic creator, but
+  // that's *incredibly* wasteful. By storing a pointer to the `Rust` category,
+  // we can add synthetics outside of `GetFormatters`. It looks like the
+  // `GetPossibleFormatterMatches` interacts with every type that gets put
+  // through the language, so we can use it to add synthetics for sum types
+  lldb::TypeCategoryImplSP category;
+
+  // Used to prevent adding a SyntheticProvider for the same sum-type more than
+  // once.
+  llvm::DenseSet<ConstString> sum_types{};
+
   /// Registers the plugin with the PluginManager
   static void Initialize();
 
@@ -92,10 +108,10 @@ public:
   // HardcodedFormatters::HardcodedSyntheticFinder
   // GetHardcodedSynthetics() override;
 
-  //   std::vector<FormattersMatchCandidate>
-  //   GetPossibleFormattersMatches(ValueObject &valobj,
-  //                                lldb::DynamicValueType use_dynamic)
-  //                                override;
+  std::vector<FormattersMatchCandidate> GetPossibleFormattersMatches(
+      ValueObject& valobj,
+      lldb::DynamicValueType use_dynamic
+  ) override;
 
   /// TODO I'm not 100% sure what these are for, but this follows the CXX
   /// counterpart closely by stripping Typedefs
@@ -193,9 +209,9 @@ public:
   //   ConstString FindBestAlternateFunctionMangledName(
   //       const Mangled mangled, const SymbolContext &sym_ctx) const override;
 
-  //   /// Returns "self", i.e. the variable name that refers to the object that
-  //   /// called a struct's function
-  //   llvm::StringRef GetInstanceVariableName() override { return "self"; };
+  /// Returns "self", i.e. the variable name that refers to the object that
+  /// called a struct's function
+  llvm::StringRef GetInstanceVariableName() override { return "self"; };
 
   //   /// Returns true if this SymbolContext should be ignored when setting
   //   /// breakpoints by line (number or regex). Helpful for languages that
@@ -207,12 +223,10 @@ public:
   //   /// TODO maybe useful for macros or something?
   //   bool IgnoreForLineBreakpoints(const SymbolContext &) const override;
 
-  //   /// Returns true if this Language supports exception breakpoints on throw
-  //   via
-  //   /// a corresponding LanguageRuntime plugin.
-  //   /// TODO probably always false?
-  //   bool SupportsExceptionBreakpointsOnThrow() const override { return false;
-  //   }
+  /// Returns true if this Language supports exception breakpoints on throw via
+  /// a corresponding LanguageRuntime plugin.
+  /// TODO probably always false?
+  bool SupportsExceptionBreakpointsOnThrow() const override { return false; }
 
   //   /// Returns true if this Language supports exception breakpoints on catch
   //   via

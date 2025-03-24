@@ -15,6 +15,7 @@
 #include <mutex>
 
 // Other libraries and framework includes
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Threading.h"
 
@@ -150,6 +151,7 @@ lldb::TypeCategoryImplSP RustLanguage::GetFormatters() {
         g_category
     );
     if (g_category) {
+      this->category = g_category;
       g_category->AddLanguage(lldb::eLanguageTypeRust);
 
       // -------------------------------------------------------------------- //
@@ -165,23 +167,25 @@ lldb::TypeCategoryImplSP RustLanguage::GetFormatters() {
 
       // This needs to be first (so that it will be checked last) since it is a
       // raw wildcard.
-      AddRustSynthetic(
-          g_category,
-          RustSumTypeSyntheticFrontEndCreator,
-          "Rust Enum (sum type) synthetic provider",
-          // Unfortunately there's no way we can tell the difference between a
-          // struct and an enum via just the type name in non-msvc-land, so we
-          // have to test everything. It's just a simple static cast of the
-          // internal type to check if it's a RustSumType, but it still kinda
-          // sucks
-          ".*",
-          ScriptedSyntheticChildren::Flags()
-              .SetCascades()
-              .SetSkipPointers(false)
-              .SetSkipReferences(false)
-              .SetFrontEndWantsDereference(),
-          true
-      );
+      // AddRustSynthetic(
+      //     g_category,
+      //     RustSumTypeSyntheticFrontEndCreator,
+      //     "Rust Enum (sum type) synthetic provider",
+      //     // Unfortunately there's no way we can tell the difference between
+      //     a
+      //     // struct and an enum via just the type name in non-msvc-land, so
+      //     we
+      //     // have to test everything. It's just a simple static cast of the
+      //     // internal type to check if it's a RustSumType, but it still kinda
+      //     // sucks
+      //     ".*",
+      //     ScriptedSyntheticChildren::Flags()
+      //         .SetCascades()
+      //         .SetSkipPointers(false)
+      //         .SetSkipReferences(false)
+      //         .SetFrontEndWantsDereference(),
+      //     true
+      // );
 
       // -------------------------------- Vec ------------------------------- //
 
@@ -267,11 +271,67 @@ lldb::TypeCategoryImplSP RustLanguage::GetFormatters() {
   return g_category;
 }
 
+std::vector<FormattersMatchCandidate>
+RustLanguage::GetPossibleFormattersMatches(
+    ValueObject& valobj,
+    lldb::DynamicValueType use_dynamic
+) {
+  // BEWARE, UNGODLY HACK BELOW:
+  //
+  // There are 2 main issues we need to solve:
+  // 1. there are 3 options for attaching synthetic providers: match by exact
+  // name, match by regex, and match by python script. Python scripts are slow,
+  // and type names are not enough to differentiate a struct from a sum-type
+  // enum.
+  // 2. Using a ".*" regex to match on every time and return an invalid
+  // synthetic for non-sum-types *works*, but is very wasteful and slow. It also
+  // ends up flagging every single type as "having a synthetic" even though for
+  // most of them it's invalid. This can cause issues, most notably in CodeLLDB
+  // which has special handling for types with synthetic providers.
+  //
+  // To solve both, we hijack this function, which is seemingly called *a lot*
+  // (presumably on every inspected valobj?). Since we have the valobj, we have
+  // the CompilerType. With the CompilerType, we can just ask if it's a
+  // sum-type. Once we've confirmed that it is one, we can add an
+  // exact-name-match synthetic for the type.
+
+  // ensure that type category "rust" is valid and has been populated
+  if (!this->category) {
+    GetFormatters();
+  }
+
+  auto* rt =
+      static_cast<RustType*>(valobj.GetCompilerType().GetOpaqueQualType());
+
+  // If it's a sum type and we haven't already seen it, add the synthetic provider
+  if (rt && rt->IsSumType() && !this->sum_types.contains(rt->m_name)) {
+    this->sum_types.insert(rt->m_name);
+
+    category->AddTypeSynthetic(
+        TypeNameSpecifierImplSP(
+            new TypeNameSpecifierImpl(valobj.GetCompilerType())
+        ),
+        lldb::SyntheticChildrenSP(new CXXSyntheticChildren(
+            ScriptedSyntheticChildren::Flags()
+                .SetCascades()
+                .SetSkipPointers(false)
+                .SetSkipReferences(false)
+                .SetFrontEndWantsDereference(),
+            "sum type",
+            RustSumTypeSyntheticFrontEndCreator
+        ))
+    );
+  }
+
+  return {};
+}
+
 // HardcodedFormatters::HardcodedSyntheticFinder
 // RustLanguage::GetHardcodedSynthetics() {}
 
 // bool RustLanguage::DemangledNameContainsPath(llvm::StringRef path,
-//                                              ConstString demangled) const {
+//                                              ConstString demangled) const
+//                                              {
 
 //                                              }
 
