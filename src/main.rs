@@ -120,7 +120,7 @@ fn main() {
     // let box_val = Box::new(enum_val);
 
     let non_zero = NonZeroU128::new(100).unwrap();
-    let large_discr = NonZeroU128::new(255);
+
     let os_string = OsString::from_str("sbubby").unwrap();
 
     let mut struct_val = Point { x: 12.3, y:32.1 };
@@ -148,6 +148,10 @@ fn main() {
     set.insert("jkl;");
 
     let mut_set = &mut set;
+
+    dbg!(GLOBAL_VAR);
+
+    let large_discr = NonZeroU128::new(255);
 
     dbg!(GLOBAL_VAR);
     // let mut buf = String::new();

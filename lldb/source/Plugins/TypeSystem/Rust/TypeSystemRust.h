@@ -188,13 +188,7 @@ struct RustDeclContext {
   RustDeclContext* parent;
   Kind kind;
 
-  // RustDeclContext(const RustDeclContext&) = delete;
-  // RustDeclContext& operator=(const RustDeclContext&) = delete;
-
   ~RustDeclContext() {}
-
-  // RustDeclContext(const ConstString& name, RustDeclContext* parent, Kind
-  // kind) : child_decls({}), name(name), parent(parent), kind(kind) {}
 
   RustDeclBase* FindByName(const ConstString& name) {
     if (child_decls.contains(name)) {
