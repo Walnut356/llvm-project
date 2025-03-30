@@ -24,7 +24,8 @@ class StrSyntheticFrontEnd : public SyntheticChildrenFrontEnd {
 public:
   StrSyntheticFrontEnd(ValueObjectSP valobj_sp);
 
-//   ConstString GetSyntheticTypeName() override { return ConstString("&str"); };
+  //   ConstString GetSyntheticTypeName() override { return ConstString("&str");
+  //   };
 
   llvm::Expected<uint32_t> CalculateNumChildren() override { return len; };
 
@@ -94,6 +95,25 @@ static SyntheticChildrenFrontEnd* RustStrSyntheticFrontEndCreator(
   if (!type.IsValid())
     return nullptr;
   return new StrSyntheticFrontEnd(valobj_sp);
+}
+
+bool RustStrSummary(
+    ValueObject& valobj,
+    Stream& stream,
+    const TypeSummaryOptions& summary_options
+) {
+
+  auto size = valobj.GetNonSyntheticValue()
+                  ->GetChildMemberWithName("length")
+                  ->GetValueAsUnsigned(0);
+
+  stream.PutChar('"');
+  for (unsigned int i = 0; i < size; ++i) {
+    stream.PutChar(valobj.GetChildAtIndex(i)->GetValueAsUnsigned(0));
+  }
+  stream.PutChar('"');
+
+  return true;
 }
 
 } // namespace formatters

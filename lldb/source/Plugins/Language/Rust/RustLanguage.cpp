@@ -251,20 +251,44 @@ lldb::TypeCategoryImplSP RustLanguage::GetFormatters() {
       //                               Summaries                              //
       // -------------------------------------------------------------------- //
 
-      RustFunctionSummaryFormat::SharedPointer format(
-          new RustFunctionSummaryFormat(
-              TypeSummaryImpl::Flags()
-                  .SetCascades()
-                  .SetSkipPointers(false)
-                  .SetSkipReferences(false),
-              RustStringSummary,
-              "built-in String summary provider"
-          )
-      );
+      // RustFunctionSummaryFormat::SharedPointer format(
+      //     new RustFunctionSummaryFormat(
+      //         TypeSummaryImpl::Flags()
+      //             .SetCascades()
+      //             .SetSkipPointers(false)
+      //             .SetSkipReferences(false),
+      //         RustStringSummary,
+      //         "built-in String summary provider"
+      //     )
+      // );
       g_category->AddTypeSummary(
           "^(alloc::([a-z_]+::)+)String$",
           lldb::eFormatterMatchRegex,
-          format
+          RustFunctionSummaryFormat::SharedPointer(
+              new RustFunctionSummaryFormat(
+                  TypeSummaryImpl::Flags()
+                      .SetCascades()
+                      .SetSkipPointers(false)
+                      .SetSkipReferences(false),
+                  RustStringSummary,
+                  "built-in String summary provider"
+              )
+          )
+      );
+
+      g_category->AddTypeSummary(
+          "^&(mut )?str$",
+          lldb::eFormatterMatchRegex,
+          RustFunctionSummaryFormat::SharedPointer(
+              new RustFunctionSummaryFormat(
+                  TypeSummaryImpl::Flags()
+                      .SetCascades()
+                      .SetSkipPointers(false)
+                      .SetSkipReferences(false),
+                  RustStrSummary,
+                  "built-in String summary provider"
+              )
+          )
       );
     }
   });
