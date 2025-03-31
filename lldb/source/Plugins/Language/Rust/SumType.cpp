@@ -137,13 +137,8 @@ bool RustSumTypeSummary(
 
   auto* vt = static_cast<RustType*>(variant.GetOpaqueQualType());
 
-  bool tuple_struct =
-      vt->IsAggregate() &&
-      // first field of a tuple struct should always be named `__0`, which the
-      // DWARFASTParser renames to `0` upon reading the struct. Since raw
-      // integers aren't valid identifiers anyway, there should be no corner
-      // cases or ambiguity
-      vt->AsAggregate()->fields[0].name == "0";
+  bool tuple_struct = vt->IsAggregate() &&
+                      vt->AsAggregate()->kind == AggregateKind::TupleStruct;
 
   if (tuple_struct) {
     stream.PutChar('(');

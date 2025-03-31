@@ -122,7 +122,6 @@ it gets.
 
 #include "lldb/Core/DumpDataExtractor.h"
 #include "lldb/Expression/UtilityFunction.h"
-#include "lldb/Host/StreamFile.h"
 #include "lldb/Symbol/CompilerType.h"
 #include "lldb/Symbol/TypeSystem.h"
 #include "lldb/lldb-enumerations.h"
@@ -142,7 +141,7 @@ namespace lldb_private {
 // -------------------------------------------------------------------------- //
 
 
-// so stupid
+
 
 /// Wrapper around RustDecl and RustDecl context
 ///
@@ -170,6 +169,7 @@ namespace lldb_private {
 /// }
 /// ```
 struct RustDeclBase;
+// so stupid ---^
 
 /// TODO docs
 struct RustDeclContext {
@@ -368,7 +368,8 @@ enum class IndirectionKind {
 enum class AggregateKind {
   Struct,
   Tuple,
-  Union
+  Union,
+  TupleStruct
 };
 
 /// A single variant, for use within RustCStyleEnum
