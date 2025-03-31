@@ -7,7 +7,9 @@
 //===----------------------------------------------------------------------===//
 
 #include "Plugins/TypeSystem/Rust/TypeSystemRust.h"
+#include "RustLanguage.h"
 #include "lldb/Core/ValueObject.h"
+#include "lldb/DataFormatters/DumpValueObjectOptions.h"
 #include "lldb/DataFormatters/FormattersHelpers.h"
 #include "lldb/DataFormatters/TypeSynthetic.h"
 #include "lldb/Utility/ConstString.h"
@@ -102,3 +104,76 @@ SyntheticChildrenFrontEnd* RustSumTypeSyntheticFrontEndCreator(
 
 } // namespace formatters
 } // namespace lldb_private
+
+bool RustSumTypeSummary(
+    ValueObject& valobj,
+    Stream& stream,
+    const TypeSummaryOptions& summary_options
+) {
+  // accessing the SyntheticFrontEnd isn't trivial here
+
+  uint64_t discr = valobj.GetNonSyntheticValue()
+                       ->GetChildMemberWithName("$discr$")
+                       ->GetValueAsUnsigned(0);
+
+  auto* rt =
+      static_cast<RustType*>(valobj.GetCompilerType().GetOpaqueQualType());
+
+  // shouldn't be possible for this to fail, but we'll be safe
+  if (!rt || !rt->IsSumType()) {
+    return false;
+  }
+
+  auto* st = rt->AsSumType();
+  auto variant = st->GetVariant(discr);
+
+  stream.PutCString(GetUnqualifiedName(variant.GetTypeName().GetStringRef()));
+
+  uint32_t num_children = valobj.GetNumChildrenIgnoringErrors();
+
+  if (num_children == 0) {
+    return true;
+  }
+
+  auto* vt = static_cast<RustType*>(variant.GetOpaqueQualType());
+
+  bool tuple_struct =
+      vt->IsAggregate() &&
+      // first field of a tuple struct should always be named `__0`, which the
+      // DWARFASTParser renames to `0` upon reading the struct. Since raw
+      // integers aren't valid identifiers anyway, there should be no corner
+      // cases or ambiguity
+      vt->AsAggregate()->fields[0].name == "0";
+
+  if (tuple_struct) {
+    stream.PutChar('(');
+  } else {
+    stream.PutChar('{');
+  }
+
+  for (uint32_t i = 0; i < (num_children - 1); ++i) {
+    auto child = valobj.GetChildAtIndex(i);
+    if (!tuple_struct) {
+      stream.PutCString(vt->AsAggregate()->fields[i].name);
+      stream.PutChar(':');
+    }
+    stream.PutCString(child->GetValueAsCString());
+    stream.PutCString(", ");
+  }
+
+  if (!tuple_struct) {
+    stream.PutCString(vt->AsAggregate()->fields[num_children - 1].name);
+    stream.PutChar(':');
+  }
+  stream.PutCString(
+      valobj.GetChildAtIndex(num_children - 1)->GetValueAsCString()
+  );
+
+  if (tuple_struct) {
+    stream.PutChar(')');
+  } else {
+    stream.PutChar('}');
+  }
+
+  return true;
+}

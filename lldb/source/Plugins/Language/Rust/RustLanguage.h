@@ -330,4 +330,7 @@ private:
 };
 } // namespace lldb_private
 
+/// Strips all scope qualifiers from a name (e.g. `Foo::Bar::Baz` -> `Baz`)
+llvm::StringRef GetUnqualifiedName(llvm::StringRef str);
+
 #endif // liblldb_RustLanguage_h_

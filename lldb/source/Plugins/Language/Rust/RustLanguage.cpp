@@ -286,7 +286,7 @@ lldb::TypeCategoryImplSP RustLanguage::GetFormatters() {
                       .SetSkipPointers(false)
                       .SetSkipReferences(false),
                   RustStrSummary,
-                  "built-in String summary provider"
+                  "built-in &str summary provider"
               )
           )
       );
@@ -327,7 +327,8 @@ RustLanguage::GetPossibleFormattersMatches(
   auto* rt =
       static_cast<RustType*>(valobj.GetCompilerType().GetOpaqueQualType());
 
-  // If it's a sum type and we haven't already seen it, add the synthetic provider
+  // If it's a sum type and we haven't already seen it, add the
+  // synthetic/summary provider
   if (rt && rt->IsSumType() && !this->sum_types.contains(rt->m_name)) {
     this->sum_types.insert(rt->m_name);
 
@@ -341,8 +342,22 @@ RustLanguage::GetPossibleFormattersMatches(
                 .SetSkipPointers(false)
                 .SetSkipReferences(false)
                 .SetFrontEndWantsDereference(),
-            "sum type",
+            "sum-type synthetic provider",
             RustSumTypeSyntheticFrontEndCreator
+        ))
+    );
+
+    category->AddTypeSummary(
+        rt->m_name,
+        lldb::eFormatterMatchExact,
+        RustFunctionSummaryFormat::SharedPointer(new RustFunctionSummaryFormat(
+            TypeSummaryImpl::Flags()
+                .SetCascades()
+                .SetSkipPointers(false)
+                .SetSkipReferences(false)
+                .SetDontShowChildren(true),
+            RustSumTypeSummary,
+            "sum-type summary provider"
         ))
     );
   }
@@ -386,4 +401,10 @@ std::string RustFunctionSummaryFormat::GetDescription() {
       m_description.c_str()
   );
   return std::string(sstr.GetString());
+}
+
+llvm::StringRef GetUnqualifiedName(llvm::StringRef str) {
+  auto idx = str.rfind(':') + 1;
+
+  return str.substr(idx);
 }
