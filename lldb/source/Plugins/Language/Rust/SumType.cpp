@@ -7,11 +7,12 @@
 //===----------------------------------------------------------------------===//
 
 #include "Plugins/TypeSystem/Rust/TypeSystemRust.h"
-#include "RustLanguage.h"
+#include "Utils.h"
+#include "lldb/Core/FormatEntity.h"
 #include "lldb/Core/ValueObject.h"
 #include "lldb/DataFormatters/DumpValueObjectOptions.h"
-#include "lldb/DataFormatters/FormattersHelpers.h"
 #include "lldb/DataFormatters/TypeSynthetic.h"
+#include "lldb/DataFormatters/ValueObjectPrinter.h"
 #include "lldb/Utility/ConstString.h"
 #include "lldb/lldb-enumerations.h"
 #include "lldb/lldb-forward.h"
@@ -20,7 +21,6 @@
 
 using namespace lldb;
 using namespace lldb_private;
-using namespace lldb_private::formatters;
 
 namespace lldb_private {
 namespace formatters {
@@ -83,6 +83,9 @@ size_t SumTypeSyntheticFrontEnd::GetIndexOfChildWithName(ConstString name) {
   return variant->GetIndexOfChildWithName(name);
 }
 
+} // namespace formatters
+} // namespace lldb_private
+
 SyntheticChildrenFrontEnd* RustSumTypeSyntheticFrontEndCreator(
     CXXSyntheticChildren*,
     lldb::ValueObjectSP valobj_sp
@@ -99,11 +102,8 @@ SyntheticChildrenFrontEnd* RustSumTypeSyntheticFrontEndCreator(
     return nullptr;
   }
 
-  return new SumTypeSyntheticFrontEnd(valobj_sp);
+  return new lldb_private::formatters::SumTypeSyntheticFrontEnd(valobj_sp);
 }
-
-} // namespace formatters
-} // namespace lldb_private
 
 bool RustSumTypeSummary(
     ValueObject& valobj,
@@ -127,47 +127,39 @@ bool RustSumTypeSummary(
   auto* st = rt->AsSumType();
   auto variant = st->GetVariant(discr);
 
+  // Prefix the output with the variant name
   stream.PutCString(GetUnqualifiedName(variant.GetTypeName().GetStringRef()));
 
   uint32_t num_children = valobj.GetNumChildrenIgnoringErrors();
 
+  // don't output empty brackets if it's a non-data-carrying variant
   if (num_children == 0) {
     return true;
   }
 
-  auto* vt = static_cast<RustType*>(variant.GetOpaqueQualType());
+  // here we take advantage of any existing summary providers to print the
+  // children. Instead of iterating over the variant's children and printing
+  // those, we just use the summary provider of the variant itself.
+  auto idx = st->discr_map.contains(discr) ? st->discr_map[discr]
+                                           : st->untagged_variant.value_or(0);
 
-  bool tuple_struct = vt->IsAggregate() &&
-                      vt->AsAggregate()->kind == AggregateKind::TupleStruct;
+  auto v = valobj.GetNonSyntheticValue()->GetChildAtIndex(idx);
 
-  if (tuple_struct) {
-    stream.PutChar('(');
-  } else {
-    stream.PutChar('{');
-  }
-
-  for (uint32_t i = 0; i < (num_children - 1); ++i) {
-    auto child = valobj.GetChildAtIndex(i);
-    if (!tuple_struct) {
-      stream.PutCString(vt->AsAggregate()->fields[i].name);
-      stream.PutChar(':');
-    }
-    stream.PutCString(child->GetValueAsCString());
-    stream.PutCString(", ");
-  }
-
-  if (!tuple_struct) {
-    stream.PutCString(vt->AsAggregate()->fields[num_children - 1].name);
-    stream.PutChar(':');
-  }
-  stream.PutCString(
-      valobj.GetChildAtIndex(num_children - 1)->GetValueAsCString()
+  ValueObjectPrinter printer(
+      *v.get(),
+      &stream,
+      DumpValueObjectOptions(*v.get())
+          .SetRevealEmptyAggregates(false)
+          .SetHideRootType(true)
+          .SetHideRootName(true)
+          .SetAllowOnelinerMode(true)
+          .SetShowSummary(true)
   );
 
-  if (tuple_struct) {
-    stream.PutChar(')');
-  } else {
-    stream.PutChar('}');
+  auto e = printer.PrintValueObject();
+
+  if (e) {
+    assert(0);
   }
 
   return true;

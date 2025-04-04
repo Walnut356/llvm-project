@@ -5,6 +5,7 @@ add_lldb_library(lldbPluginRustLanguage PLUGIN
   Vec.cpp
   String.cpp
   SumType.cpp
+  Utils.cpp
 
   LINK_LIBS
     lldbCore

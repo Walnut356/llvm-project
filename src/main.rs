@@ -10,10 +10,11 @@ pub enum Number {
 #[repr(u8)]
 pub enum Container {
     First(u32),
-    Second { val: u64, val2: i8 },
+    Second { val: u64, val2: Point },
     Third,
 }
 
+#[derive(Debug, Default, Clone, Copy)]
 pub struct Point {
     x: f32,
     y: f32,
@@ -67,7 +68,7 @@ fn main() {
     let mut_val = &mut val2;
     let ref_ref = &&val1;
     let mut_mut = &mut &mut val2;
-    let ref_mut = & &mut val2;
+    let ref_mut = &&mut val2;
     let mut_ref = &mut &val2;
 
     let ref_ref_ref = &&&val1;
@@ -78,7 +79,7 @@ fn main() {
 
     let ref_mut_mut = &&mut &mut val2;
     let mut_ref_ref = &mut &&val2;
-    let ref_mut_ref = & &mut &val2;
+    let ref_mut_ref = &&mut &val2;
     let mut_ref_mut = &mut &&mut val2;
 
     let box_ptr = Box::new(0u8);
@@ -115,7 +116,10 @@ fn main() {
     let enum_val = Number::One;
     let mut enum_val2 = Number::Two;
     let sum_val = Container::First(15);
-    let sum_val_2 = Container::Second { val: 1000, val2: 10 };
+    let sum_val_2 = Container::Second {
+        val: 1000,
+        val2: Point { x: 5.0, y: 10.0 },
+    };
     let sum_val_3 = Container::Third;
     // let box_val = Box::new(enum_val);
 
@@ -123,7 +127,7 @@ fn main() {
 
     let os_string = OsString::from_str("sbubby").unwrap();
 
-    let mut struct_val = Point { x: 12.3, y:32.1 };
+    let mut struct_val = Point { x: 12.3, y: 32.1 };
     struct_val.increase(1.0, 1.0);
     let union_val = Reg { rax: 20 };
     let thing = [0, 1, 2, 3].to_vec();
@@ -134,7 +138,6 @@ fn main() {
     let tuple_struct = TupleStruct(95, 64.0);
 
     let ret_val = do_thing(enum_val);
-
 
     let asdlkfj = 3000;
     let mut map = HashMap::new();

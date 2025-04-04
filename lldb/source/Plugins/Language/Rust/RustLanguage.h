@@ -33,22 +33,6 @@ namespace lldb_private {
 
 class RustLanguage : public Language {
 public:
-  // used for some stupid trickery
-  // long story short, synthetics can only be added via exact name match, regex,
-  // or a python script. The gaping hole in that list is "a c++ callback that
-  // can actually access `RustType` internals". Sum-types cannot be
-  // distinguished from regular structs by name alone. We can technically do a
-  // wildcard regex and just check everything in the synthetic creator, but
-  // that's *incredibly* wasteful. By storing a pointer to the `Rust` category,
-  // we can add synthetics outside of `GetFormatters`. It looks like the
-  // `GetPossibleFormatterMatches` interacts with every type that gets put
-  // through the language, so we can use it to add synthetics for sum types
-  lldb::TypeCategoryImplSP category;
-
-  // Used to prevent adding a SyntheticProvider for the same sum-type more than
-  // once.
-  llvm::DenseSet<ConstString> sum_types{};
-
   /// Registers the plugin with the PluginManager
   static void Initialize();
 
@@ -97,16 +81,34 @@ public:
   /// The python scripts look very similar to the synthetic/summary
   /// implimentations, but have the advantage of accessing LLDB's internals and
   /// significantly better performance
+  ///
+  /// These summaries are applied via regex, exact name match, or python
+  /// callback. For C++ callbacks that can inspect `ValueObject`, see
+  /// `RustLanguage::HardcodedSyntheticFinder` and
+  /// `RustLanguage::HardcodedSummaryFinder`
   lldb::TypeCategoryImplSP GetFormatters() override;
 
   //   HardcodedFormatters::HardcodedFormatFinder GetHardcodedFormats()
   //   override;
 
-  //   HardcodedFormatters::HardcodedSummaryFinder GetHardcodedSummaries()
-  //   override;
+  /// As opposed to the formatters in `GetFormatters`, this can call a C++
+  /// callback on a `ValueObject` and apply a formatter based on the internals
+  /// of the valobj itself. This allows us to apply formatters to types that
+  /// can't easily be differentiated by type name, such as sum-type enums.
+  ///
+  /// Despite the name, these *can* be overridden by `GetFormatters()` and
+  /// summaries added via the repl
+  HardcodedFormatters::HardcodedSummaryFinder GetHardcodedSummaries() override;
 
-  // HardcodedFormatters::HardcodedSyntheticFinder
-  // GetHardcodedSynthetics() override;
+  /// As opposed to the formatters in `GetFormatters`, this can call a C++
+  /// callback on a `ValueObject` and apply a formatter based on the internals
+  /// of the valobj itself. This allows us to apply formatters to types that
+  /// can't easily be differentiated by type name, such as sum-type enums.
+  ///
+  /// Despite the name, these *can* be overridden by `GetFormatters()` and
+  /// synthetics added via the repl
+  HardcodedFormatters::HardcodedSyntheticFinder
+  GetHardcodedSynthetics() override;
 
   std::vector<FormattersMatchCandidate> GetPossibleFormattersMatches(
       ValueObject& valobj,
@@ -271,66 +273,8 @@ private:
   RustSyntheticChildren(const RustSyntheticChildren&) = delete;
   const RustSyntheticChildren& operator=(const RustSyntheticChildren&) = delete;
 };
-
-// -------------------------------------------------------------------------- //
-//                               Type Summaries                               //
-// -------------------------------------------------------------------------- //
-
-/// summaries implemented via a C++ function
-struct RustFunctionSummaryFormat : public TypeSummaryImpl {
-  // we should convert these to SBValue and SBStream if we ever cross the
-  // boundary towards the external world
-  typedef std::function<bool(ValueObject&, Stream&, const TypeSummaryOptions&)>
-      Callback;
-
-  Callback m_impl;
-  std::string m_description;
-
-  RustFunctionSummaryFormat(
-      const TypeSummaryImpl::Flags& flags,
-      Callback impl,
-      const char* description
-  )
-      : TypeSummaryImpl(Kind::eCallback, flags), m_impl(impl),
-        m_description(description ? description : "") {};
-
-  ~RustFunctionSummaryFormat() override = default;
-
-  Callback GetBackendFunction() const { return m_impl; }
-
-  const char* GetTextualInfo() const { return m_description.c_str(); }
-
-  void SetBackendFunction(Callback cb_func) { m_impl = std::move(cb_func); }
-
-  void SetTextualInfo(const char* descr) {
-    if (descr)
-      m_description.assign(descr);
-    else
-      m_description.clear();
-  }
-
-  bool FormatObject(
-      ValueObject* valobj,
-      std::string& dest,
-      const TypeSummaryOptions& options
-  ) override;
-
-  std::string GetDescription() override;
-
-  static bool classof(const TypeSummaryImpl* S) {
-    return S->GetKind() == Kind::eCallback;
-  }
-
-  typedef std::shared_ptr<RustFunctionSummaryFormat> SharedPointer;
-
-private:
-  RustFunctionSummaryFormat(const RustFunctionSummaryFormat&) = delete;
-  const RustFunctionSummaryFormat&
-  operator=(const RustFunctionSummaryFormat&) = delete;
-};
 } // namespace lldb_private
 
-/// Strips all scope qualifiers from a name (e.g. `Foo::Bar::Baz` -> `Baz`)
-llvm::StringRef GetUnqualifiedName(llvm::StringRef str);
+
 
 #endif // liblldb_RustLanguage_h_

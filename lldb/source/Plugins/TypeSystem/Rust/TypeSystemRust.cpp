@@ -90,8 +90,10 @@ lldb::TypeSystemSP TypeSystemRust::CreateInstance(
     } else if (target) {
       arch = target->GetArchitecture();
       astc = std::shared_ptr<TypeSystemRust>(new TypeSystemRust);
-      //   astc = std::shared_ptr<TypeSystemRustForExpr>(
-      //       new TypeSystemRustForExpr(target->shared_from_this()));
+      astc->m_target_wp = target->shared_from_this();
+      // astc = std::shared_ptr<TypeSystemRustForExpr>(
+      //     new TypeSystemRustForExpr(target->shared_from_this())
+      // );
     }
 
     if (arch.IsValid()) {
@@ -840,7 +842,7 @@ CompilerType TypeSystemRust::ParseSumType(
 
       // matches the expected naming format for current rust SyntheticProviders
       ConstString name =
-          ConstString(llvm::formatv("$variant${0}", variant_idx).str());
+          ConstString(llvm::formatv("$variant{0}$", variant_idx).str());
 
       variant_types.push_back({underlying_type, name});
 
@@ -1327,6 +1329,7 @@ TypeSystemRust::GetDeclContextForUIDFromDWARF(const plugin::dwarf::DWARFDIE& die
     std::optional<int> call_line;
     std::optional<int> call_column;
 
+    // TODO
     auto data = die.GetDIENamesAndRanges(
         c_name,
         mangled,
@@ -3059,7 +3062,7 @@ bool TypeSystemRust::DumpTypeValue(
   // `U00000001` raw unicode value which is unhelpful. This reformats chars to
   // their appropriate ascii representation/escape code when appropriate.
   if (format == lldb::eFormatCharPrintable ||
-      format == eFormatUnicode32 && rt->IsChar()) {
+      (format == eFormatUnicode32 && rt->IsChar())) {
     uint64_t value = data.GetMaxU64Bitfield(
         &data_offset,
         data_byte_size,
@@ -3214,5 +3217,4 @@ void TypeSystemRust::PrintDeclContexts() {
     printf("}\n\n");
   }
 }
-
 } // namespace lldb_private

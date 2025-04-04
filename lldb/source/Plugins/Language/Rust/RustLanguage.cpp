@@ -43,45 +43,6 @@ using namespace lldb_private::formatters;
 
 LLDB_PLUGIN_DEFINE(RustLanguage)
 
-/// Wrapper function to easily add a RustSyntheticFrontEnd. Piggybacks on
-/// CXXSyntheticChildren for the time being because 1. i'm lazy and 2. it
-/// doesn't do anything crazy enough to warrant writing our own version
-void AddRustSynthetic(
-    TypeCategoryImpl::SharedPointer category_sp,
-    CXXSyntheticChildren::CreateFrontEndCallback generator,
-    const char* description,
-    llvm::StringRef type_name,
-    ScriptedSyntheticChildren::Flags flags,
-    bool regex
-) {
-  lldb::SyntheticChildrenSP synth_sp(
-      new CXXSyntheticChildren(flags, description, generator)
-  );
-  FormatterMatchType match_type =
-      regex ? eFormatterMatchRegex : eFormatterMatchExact;
-  category_sp->AddTypeSynthetic(type_name, match_type, synth_sp);
-}
-
-/// Wrapper function to easily add a RustSummary. Piggybacks on
-/// CXXFunctionSummaryFormat for the time being because 1. i'm lazy and 2. it
-/// doesn't do anything crazy enough to warrant writing our own version
-// void AddRustSummary(
-//     TypeCategoryImpl::SharedPointer category_sp,
-//     RustFunctionSummaryFormat::Callback funct,
-//     const char* description,
-//     llvm::StringRef type_name,
-//     TypeSummaryImpl::Flags flags,
-//     bool regex = false
-// ) {
-//   RustFunctionSummaryFormat::SharedPointer summary_sp(
-//       new RustFunctionSummaryFormat(flags, funct, description)
-//   );
-
-//   FormatterMatchType match_type =
-//       regex ? eFormatterMatchRegex : eFormatterMatchExact;
-//   category_sp->AddTypeSummary(type_name, match_type, summary_sp);
-// }
-
 void RustLanguage::Initialize() {
   PluginManager::RegisterPlugin(
       GetPluginNameStatic(),
@@ -151,7 +112,6 @@ lldb::TypeCategoryImplSP RustLanguage::GetFormatters() {
         g_category
     );
     if (g_category) {
-      this->category = g_category;
       g_category->AddLanguage(lldb::eLanguageTypeRust);
 
       // -------------------------------------------------------------------- //
@@ -189,7 +149,7 @@ lldb::TypeCategoryImplSP RustLanguage::GetFormatters() {
 
       // -------------------------------- Vec ------------------------------- //
 
-      AddRustSynthetic(
+      AddCXXSynthetic(
           g_category,
           RustVecSyntheticFrontEndCreator,
           "standard library Vec synthetic provider",
@@ -204,7 +164,7 @@ lldb::TypeCategoryImplSP RustLanguage::GetFormatters() {
 
       // ------------------------------- Slice ------------------------------ //
 
-      AddRustSynthetic(
+      AddCXXSynthetic(
           g_category,
           RustSliceSyntheticFrontEndCreator,
           "built-in slice synthetic provider",
@@ -219,7 +179,7 @@ lldb::TypeCategoryImplSP RustLanguage::GetFormatters() {
 
       // ------------------------------ String ------------------------------ //
 
-      AddRustSynthetic(
+      AddCXXSynthetic(
           g_category,
           RustStringSyntheticFrontEndCreator,
           "built-in String synthetic provider",
@@ -234,7 +194,7 @@ lldb::TypeCategoryImplSP RustLanguage::GetFormatters() {
 
       // ------------------------------- &str ------------------------------- //
 
-      AddRustSynthetic(
+      AddCXXSynthetic(
           g_category,
           RustStrSyntheticFrontEndCreator,
           "built-in &str synthetic provider",
@@ -251,48 +211,194 @@ lldb::TypeCategoryImplSP RustLanguage::GetFormatters() {
       //                               Summaries                              //
       // -------------------------------------------------------------------- //
 
-      // RustFunctionSummaryFormat::SharedPointer format(
-      //     new RustFunctionSummaryFormat(
-      //         TypeSummaryImpl::Flags()
-      //             .SetCascades()
-      //             .SetSkipPointers(false)
-      //             .SetSkipReferences(false),
-      //         RustStringSummary,
-      //         "built-in String summary provider"
-      //     )
-      // );
       g_category->AddTypeSummary(
           "^(alloc::([a-z_]+::)+)String$",
           lldb::eFormatterMatchRegex,
-          RustFunctionSummaryFormat::SharedPointer(
-              new RustFunctionSummaryFormat(
-                  TypeSummaryImpl::Flags()
-                      .SetCascades()
-                      .SetSkipPointers(false)
-                      .SetSkipReferences(false),
-                  RustStringSummary,
-                  "built-in String summary provider"
-              )
-          )
+          CXXFunctionSummaryFormat::SharedPointer(new CXXFunctionSummaryFormat(
+              TypeSummaryImpl::Flags()
+                  .SetCascades()
+                  .SetSkipPointers(false)
+                  .SetSkipReferences(false),
+              RustStringSummary,
+              "built-in String summary provider"
+          ))
       );
 
       g_category->AddTypeSummary(
           "^&(mut )?str$",
           lldb::eFormatterMatchRegex,
-          RustFunctionSummaryFormat::SharedPointer(
-              new RustFunctionSummaryFormat(
-                  TypeSummaryImpl::Flags()
-                      .SetCascades()
-                      .SetSkipPointers(false)
-                      .SetSkipReferences(false),
-                  RustStrSummary,
-                  "built-in &str summary provider"
-              )
-          )
+          CXXFunctionSummaryFormat::SharedPointer(new CXXFunctionSummaryFormat(
+              TypeSummaryImpl::Flags()
+                  .SetCascades()
+                  .SetSkipPointers(false)
+                  .SetSkipReferences(false),
+              RustStrSummary,
+              "built-in &str summary provider"
+          ))
+      );
+
+      g_category->AddTypeSummary(
+          "^(alloc::([a-z_]+::)+)Vec<.+>$",
+          lldb::eFormatterMatchRegex,
+          CXXFunctionSummaryFormat::SharedPointer(new CXXFunctionSummaryFormat(
+              TypeSummaryImpl::Flags()
+                  .SetCascades()
+                  .SetSkipPointers(false)
+                  .SetSkipReferences(false)
+                  .SetDontShowChildren(true),
+              RustCollectionSummary,
+              "built-in Vec summary provider"
+          ))
+      );
+
+      g_category->AddTypeSummary(
+          "^&(mut )?\\[.+\\]$",
+          lldb::eFormatterMatchRegex,
+          CXXFunctionSummaryFormat::SharedPointer(new CXXFunctionSummaryFormat(
+              TypeSummaryImpl::Flags()
+                  .SetCascades()
+                  .SetSkipPointers(false)
+                  .SetSkipReferences(false)
+                  .SetDontShowChildren(true),
+              RustCollectionSummary,
+              "built-in Slice summary provider"
+          ))
       );
     }
   });
   return g_category;
+}
+
+HardcodedFormatters::HardcodedSummaryFinder
+RustLanguage::GetHardcodedSummaries() {
+  static llvm::once_flag g_initialize;
+  static HardcodedFormatters::HardcodedSummaryFinder g_formatters;
+
+  llvm::call_once(g_initialize, []() -> void {
+    g_formatters.push_back(
+        [](lldb_private::ValueObject& valobj,
+           lldb::DynamicValueType,
+           FormatManager&) -> TypeSummaryImpl::SharedPointer {
+          static CXXFunctionSummaryFormat::SharedPointer formatter_sp(
+              new CXXFunctionSummaryFormat(
+                  TypeSummaryImpl::Flags()
+                      .SetCascades()
+                      .SetSkipPointers(false)
+                      .SetSkipReferences(false)
+                      .SetDontShowChildren(true),
+                  RustSumTypeSummary,
+                  "sum-type summary provider"
+              )
+          );
+
+          auto* rt = static_cast<RustType*>(
+              valobj.GetCompilerType().GetOpaqueQualType()
+          );
+
+          if (rt && rt->IsSumType()) {
+            return formatter_sp;
+          }
+
+          return nullptr;
+        }
+    );
+
+    g_formatters.push_back(
+        [](lldb_private::ValueObject& valobj,
+           lldb::DynamicValueType,
+           FormatManager&) -> TypeSummaryImpl::SharedPointer {
+          static CXXFunctionSummaryFormat::SharedPointer formatter_sp(
+              new CXXFunctionSummaryFormat(
+                  TypeSummaryImpl::Flags()
+                      .SetCascades()
+                      .SetSkipPointers(false)
+                      .SetSkipReferences(false)
+                      .SetDontShowChildren(true),
+                  RustAggregateSummary,
+                  "aggregate summary provider"
+              )
+          );
+
+          auto* rt = static_cast<RustType*>(
+              valobj.GetCompilerType().GetOpaqueQualType()
+          );
+
+          if (rt && rt->IsAggregate()) {
+            return formatter_sp;
+          }
+
+          return nullptr;
+        }
+    );
+
+    g_formatters.push_back(
+        [](lldb_private::ValueObject& valobj,
+           lldb::DynamicValueType,
+           FormatManager&) -> TypeSummaryImpl::SharedPointer {
+          static CXXFunctionSummaryFormat::SharedPointer formatter_sp(
+              new CXXFunctionSummaryFormat(
+                  TypeSummaryImpl::Flags()
+                      .SetCascades()
+                      .SetSkipPointers(false)
+                      .SetSkipReferences(false)
+                      .SetDontShowChildren(true),
+                  RustIndirectionSummary,
+                  "ref/ptr summary provider"
+              )
+          );
+
+          auto* rt = static_cast<RustType*>(
+              valobj.GetCompilerType().GetOpaqueQualType()
+          );
+
+          if (rt && rt->IsIndirection()) {
+            return formatter_sp;
+          }
+
+          return nullptr;
+        }
+    );
+  });
+
+  return g_formatters;
+}
+
+HardcodedFormatters::HardcodedSyntheticFinder
+RustLanguage::GetHardcodedSynthetics() {
+  static llvm::once_flag g_initialize;
+  static HardcodedFormatters::HardcodedSyntheticFinder g_formatters;
+
+  llvm::call_once(g_initialize, []() -> void {
+    g_formatters.push_back(
+        [](lldb_private::ValueObject& valobj,
+           lldb::DynamicValueType,
+           FormatManager& fmt_mgr) -> SyntheticChildren::SharedPointer {
+          static lldb::SyntheticChildrenSP formatter_sp(
+              new CXXSyntheticChildren(
+                  ScriptedSyntheticChildren::Flags()
+                      .SetCascades()
+                      .SetSkipPointers(false)
+                      .SetSkipReferences(false)
+                      .SetFrontEndWantsDereference(),
+                  "sum-type synthetic provider",
+                  RustSumTypeSyntheticFrontEndCreator
+              )
+          );
+
+          auto* rt = static_cast<RustType*>(
+              valobj.GetCompilerType().GetOpaqueQualType()
+          );
+
+          if (rt && rt->IsSumType()) {
+            return formatter_sp;
+          }
+
+          return nullptr;
+        }
+    );
+  });
+
+  return g_formatters;
 }
 
 std::vector<FormattersMatchCandidate>
@@ -300,111 +406,5 @@ RustLanguage::GetPossibleFormattersMatches(
     ValueObject& valobj,
     lldb::DynamicValueType use_dynamic
 ) {
-  // BEWARE, UNGODLY HACK BELOW:
-  //
-  // There are 2 main issues we need to solve:
-  // 1. there are 3 options for attaching synthetic providers: match by exact
-  // name, match by regex, and match by python script. Python scripts are slow,
-  // and type names are not enough to differentiate a struct from a sum-type
-  // enum.
-  // 2. Using a ".*" regex to match on every time and return an invalid
-  // synthetic for non-sum-types *works*, but is very wasteful and slow. It also
-  // ends up flagging every single type as "having a synthetic" even though for
-  // most of them it's invalid. This can cause issues, most notably in CodeLLDB
-  // which has special handling for types with synthetic providers.
-  //
-  // To solve both, we hijack this function, which is seemingly called *a lot*
-  // (presumably on every inspected valobj?). Since we have the valobj, we have
-  // the CompilerType. With the CompilerType, we can just ask if it's a
-  // sum-type. Once we've confirmed that it is one, we can add an
-  // exact-name-match synthetic for the type.
-
-  // ensure that type category "rust" is valid and has been populated
-  if (!this->category) {
-    GetFormatters();
-  }
-
-  auto* rt =
-      static_cast<RustType*>(valobj.GetCompilerType().GetOpaqueQualType());
-
-  // If it's a sum type and we haven't already seen it, add the
-  // synthetic/summary provider
-  if (rt && rt->IsSumType() && !this->sum_types.contains(rt->m_name)) {
-    this->sum_types.insert(rt->m_name);
-
-    category->AddTypeSynthetic(
-        TypeNameSpecifierImplSP(
-            new TypeNameSpecifierImpl(valobj.GetCompilerType())
-        ),
-        lldb::SyntheticChildrenSP(new CXXSyntheticChildren(
-            ScriptedSyntheticChildren::Flags()
-                .SetCascades()
-                .SetSkipPointers(false)
-                .SetSkipReferences(false)
-                .SetFrontEndWantsDereference(),
-            "sum-type synthetic provider",
-            RustSumTypeSyntheticFrontEndCreator
-        ))
-    );
-
-    category->AddTypeSummary(
-        rt->m_name,
-        lldb::eFormatterMatchExact,
-        RustFunctionSummaryFormat::SharedPointer(new RustFunctionSummaryFormat(
-            TypeSummaryImpl::Flags()
-                .SetCascades()
-                .SetSkipPointers(false)
-                .SetSkipReferences(false)
-                .SetDontShowChildren(true),
-            RustSumTypeSummary,
-            "sum-type summary provider"
-        ))
-    );
-  }
-
   return {};
-}
-
-// HardcodedFormatters::HardcodedSyntheticFinder
-// RustLanguage::GetHardcodedSynthetics() {}
-
-// bool RustLanguage::DemangledNameContainsPath(llvm::StringRef path,
-//                                              ConstString demangled) const
-//                                              {
-
-//                                              }
-
-bool RustFunctionSummaryFormat::FormatObject(
-    ValueObject* valobj,
-    std::string& dest,
-    const TypeSummaryOptions& options
-) {
-  dest.clear();
-  StreamString stream;
-  if (!m_impl || !m_impl(*valobj, stream, options))
-    return false;
-  dest = std::string(stream.GetString());
-  return true;
-}
-
-std::string RustFunctionSummaryFormat::GetDescription() {
-  StreamString sstr;
-  sstr.Printf(
-      "%s%s%s%s%s%s%s %s",
-      Cascades() ? "" : " (not cascading)",
-      !DoesPrintChildren(nullptr) ? "" : " (show children)",
-      !DoesPrintValue(nullptr) ? " (hide value)" : "",
-      IsOneLiner() ? " (one-line printout)" : "",
-      SkipsPointers() ? " (skip pointers)" : "",
-      SkipsReferences() ? " (skip references)" : "",
-      HideNames(nullptr) ? " (hide member names)" : "",
-      m_description.c_str()
-  );
-  return std::string(sstr.GetString());
-}
-
-llvm::StringRef GetUnqualifiedName(llvm::StringRef str) {
-  auto idx = str.rfind(':') + 1;
-
-  return str.substr(idx);
 }
