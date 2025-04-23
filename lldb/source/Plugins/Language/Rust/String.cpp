@@ -109,6 +109,9 @@ ChildCacheState StringSyntheticFrontEnd::Update() {
 
 ValueObjectSP StringSyntheticFrontEnd::GetChildAtIndex(uint32_t idx) {
   auto child = inner_vec->GetChildAtIndex(idx);
+  if (!child) {
+    return child;
+  }
   child->SetFormat(eFormatCharPrintable);
 
   child->SetSummaryFormat(summary);
