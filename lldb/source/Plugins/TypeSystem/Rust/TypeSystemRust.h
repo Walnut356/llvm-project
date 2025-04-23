@@ -115,6 +115,7 @@ it gets.
 #define liblldb_TypeSystemRust_h_
 
 // #include "Plugins/ExpressionParser/Rust/RustUserExpression.h"
+#include "Plugins/ExpressionParser/Rust/RustUserExpression.h"
 #include "Plugins/SymbolFile/DWARF/DWARFASTParser.h"
 #include "Plugins/SymbolFile/DWARF/DWARFDebugInfoEntry.h"
 #include "Plugins/SymbolFile/DWARF/DWARFFormValue.h"
@@ -126,22 +127,38 @@ it gets.
 #include "lldb/Symbol/TypeSystem.h"
 #include "lldb/lldb-enumerations.h"
 #include "llvm/BinaryFormat/Dwarf.h"
+#include <memory>
 #include <optional>
 #include <vector>
 
 namespace lldb_private {
 
+const ConstString UNIT_TYPE_NAME{"()"};
+const ConstString I8_NAME{"i8"};
+const ConstString U8_NAME{"u8"};
+const ConstString I16_NAME{"i16"};
+const ConstString U16_NAME{"u16"};
+const ConstString I32_NAME{"i32"};
+const ConstString U32_NAME{"u32"};
+const ConstString I64_NAME{"i64"};
+const ConstString U64_NAME{"u64"};
+const ConstString I128_NAME{"i128"};
+const ConstString U128_NAME{"u128"};
+const ConstString ISIZE_NAME{"isize"};
+const ConstString USIZE_NAME{"usize"};
+
+const ConstString F16_NAME{"f16"};
+const ConstString F32_NAME{"f32"};
+const ConstString F64_NAME{"f64"};
+const ConstString F128_NAME{"f128"};
+const ConstString BOOL_NAME{"bool"};
+const ConstString CHAR_NAME{"char"};
+
 // -------------------------------------------------------------------------- //
-//                                                                            //
-//                                                                            //
-//                                                                            //
+// -------------------------------------------------------------------------- //
 //                                 Rust Decls                                 //
-//                                                                            //
-//                                                                            //
 // -------------------------------------------------------------------------- //
-
-
-
+// -------------------------------------------------------------------------- //
 
 /// Wrapper around RustDecl and RustDecl context
 ///
@@ -256,7 +273,6 @@ struct RustDecl {
   }
 };
 
-
 struct RustDeclBase {
 public:
   enum Kind {
@@ -318,13 +334,9 @@ public:
 };
 
 // -------------------------------------------------------------------------- //
-//                                                                            //
-//                                                                            //
-//                                                                            //
+// -------------------------------------------------------------------------- //
 //                                  RustTypes                                 //
-//                                                                            //
-//                                                                            //
-//                                                                            //
+// -------------------------------------------------------------------------- //
 // -------------------------------------------------------------------------- //
 
 /// Contains the relevant dwarf attribute tags for `DW_TAG_base_type` DIE
@@ -775,7 +787,70 @@ public:
       m_variant;
 };
 
+/// Contains unique_ptr RustTypes for the built-in numeric types, bool, and char
+class RustPrimitives {
+  /// in order: i8, i16, i32, i64, i128
+  std::unique_ptr<RustType> int_types[5]{
+      std::make_unique<RustType>(RustType{I8_NAME, 1, RustInt{}}),
+      std::make_unique<RustType>(RustType{I16_NAME, 2, RustInt{}}),
+      std::make_unique<RustType>(RustType{I32_NAME, 4, RustInt{}}),
+      std::make_unique<RustType>(RustType{I64_NAME, 8, RustInt{}}),
+      std::make_unique<RustType>(RustType{I128_NAME, 16, RustInt{}}),
+  };
+  std::unique_ptr<RustType> isize_type =
+      std::make_unique<RustType>(RustType{ISIZE_NAME, 8, RustInt{}});
+  /// in order: u8, u16, u32, u64, u128
+  std::unique_ptr<RustType> uint_types[5]{
+      std::make_unique<RustType>(RustType{U8_NAME, 1, RustUInt{}}),
+      std::make_unique<RustType>(RustType{U16_NAME, 2, RustUInt{}}),
+      std::make_unique<RustType>(RustType{U32_NAME, 4, RustUInt{}}),
+      std::make_unique<RustType>(RustType{U64_NAME, 8, RustUInt{}}),
+      std::make_unique<RustType>(RustType{U128_NAME, 16, RustUInt{}}),
+  };
+  std::unique_ptr<RustType> usize_type =
+      std::make_unique<RustType>(RustType{USIZE_NAME, 8, RustUInt{}});
+  /// in order: f16, f32, f64, f128
+  std::unique_ptr<RustType> float_types[4]{
+      std::make_unique<RustType>(RustType{F16_NAME, 2, RustFloat{}}),
+      std::make_unique<RustType>(RustType{F32_NAME, 4, RustFloat{}}),
+      std::make_unique<RustType>(RustType{F64_NAME, 8, RustFloat{}}),
+      std::make_unique<RustType>(RustType{F128_NAME, 16, RustFloat{}}),
+  };
+  std::unique_ptr<RustType> bool_type =
+      std::make_unique<RustType>(RustType{BOOL_NAME, 1, RustBool{}});
+  std::unique_ptr<RustType> char_type =
+      std::make_unique<RustType>(RustType{CHAR_NAME, 4, RustChar{}});
+
+public:
+  void SetPointerByteSize(uint64_t size) {
+    isize_type->m_size = size;
+    usize_type->m_size = size;
+  }
+
+  RustType* i8() { return int_types[0].get(); }
+  RustType* i16() { return int_types[1].get(); }
+  RustType* i32() { return int_types[2].get(); }
+  RustType* i64() { return int_types[3].get(); }
+  RustType* i128() { return int_types[4].get(); }
+  RustType* isize() { return isize_type.get(); }
+  RustType* u8() { return uint_types[0].get(); }
+  RustType* u16() { return uint_types[1].get(); }
+  RustType* u32() { return uint_types[2].get(); }
+  RustType* u64() { return uint_types[3].get(); }
+  RustType* u128() { return uint_types[4].get(); }
+  RustType* usize() { return usize_type.get(); }
+  RustType* f16() { return float_types[0].get(); }
+  RustType* f32() { return float_types[1].get(); }
+  RustType* f64() { return float_types[2].get(); }
+  RustType* f128() { return float_types[3].get(); }
+  RustType* Bool() { return bool_type.get(); }
+  RustType* Char() { return char_type.get(); }
+};
+
 const ConstString SUM_TYPE_DISCR_NAME = ConstString{"tag"};
+
+// TODO hey wait, doesn't every single `new RustType` leak? How long does
+// `TypeSystem` live?
 
 // -------------------------------------------------------------------------- //
 //                                                                            //
@@ -787,7 +862,9 @@ const ConstString SUM_TYPE_DISCR_NAME = ConstString{"tag"};
 //                                                                            //
 // -------------------------------------------------------------------------- //
 
-class TypeSystemRust : public TypeSystem, public plugin::dwarf::DWARFASTParser {
+class TypeSystemRust : public TypeSystem,
+                       public plugin::dwarf::DWARFASTParser
+                       /*public PDBASTParser */ {
 public:
   // ------------------------------------------------------------------------ //
   //                         Constructors/Destructors                         //
@@ -849,11 +926,12 @@ public:
 
   // ------------------------------ AST Parsers ----------------------------- //
 
-  /// Other type system implementations keep a separate DWARFASTParser, but this
+  /// Other type system implementations keep a separate ASTParser, but this
   /// implementation has it as a parent class, so it just returns itself.
   plugin::dwarf::DWARFASTParser* GetDWARFParser() override { return this; }
 
-  /// TODO PDBASTParser -> interface
+  /// Other type system implementations keep a separate ASTParser, but this
+  /// implementation has it as a parent class, so it just returns itself.
   PDBASTParser* GetPDBParser() override { return nullptr; }
 
   /// unused
@@ -1530,12 +1608,19 @@ public:
       const EvaluateExpressionOptions& options,
       ValueObject* ctx_obj
   ) override {
-    // lldb::TargetSP target = m_target_wp.lock();
-    // if (target)
-    //   return new RustUserExpression(*target, expr, prefix, language,
-    //   desired_type,
-    //                                 options);
-    return nullptr;
+    // return nullptr;
+    lldb::TargetSP target_sp = m_target_wp.lock();
+    if (!target_sp)
+      return nullptr;
+
+    return new RustUserExpression(
+        *target_sp.get(),
+        expr,
+        prefix,
+        language,
+        desired_type,
+        options
+    );
   };
 
   FunctionCaller* GetFunctionCaller(
@@ -1544,13 +1629,13 @@ public:
       const ValueList& arg_value_list,
       const char* name
   ) override {
-    return 0;
+    return nullptr;
   };
 
   // TODO ?
   std::unique_ptr<UtilityFunction>
   CreateUtilityFunction(std::string text, std::string name) override {
-    return {};
+    return nullptr;
   };
 
   /// based on the TypeSystemClang implementation, this looks like a final step
@@ -1693,6 +1778,54 @@ public:
   lldb::TypeSP ParseFunctionType(const plugin::dwarf::DWARFDIE& die);
 
   // ------------------------------------------------------------------------ //
+  //                          PDBASTParser Interface                          //
+  // ------------------------------------------------------------------------ //
+
+  // lldb::TypeSP ParseTypeFromSymbol(
+  //     const lldb_private::SymbolContext& sc,
+  //     const llvm::pdb::PDBSymbol& type,
+  //     bool* type_is_new_ptr
+  // ) override;
+
+  // lldb_private::ConstString
+  // ConstructDemangledNameFromSymbol(const llvm::pdb::PDBSymbol& symbol) override;
+
+  // lldb_private::Function* ParseFunctionFromSymbol(
+  //     lldb_private::CompileUnit& comp_unit,
+  //     const llvm::pdb::PDBSymbol& symbol,
+  //     const lldb_private::AddressRange& range
+  // ) override;
+
+  // bool CompleteTypeFromSymbol(
+  //     const llvm::pdb::PDBSymbol& symbol,
+  //     lldb_private::Type* type,
+  //     lldb_private::CompilerType& compiler_type
+  // ) override;
+
+  // lldb_private::CompilerDecl GetDeclForSymbol(const llvm::pdb::PDBSymbol& symbol
+  // ) override;
+
+  // lldb_private::CompilerDeclContext
+  // GetDeclContextForSymbol(const llvm::pdb::PDBSymbol& symbol) override;
+
+  // lldb_private::CompilerDeclContext
+  // GetDeclContextContainingSymbol(const llvm::pdb::PDBSymbol& symbol) override;
+
+  // // virtual void EnsureAllDIEsInDeclContextHaveBeenParsed(
+  // //     CompilerDeclContext decl_context) = 0;
+
+  // // virtual std::string GetDIEClassTemplateParams(const DWARFDIE &die) = 0;
+
+  // lldb_private::Type* GetTypeForSymbol(const llvm::pdb::PDBSymbol& die);
+
+  // void
+  // ParseDeclsForDeclContext(const lldb_private::CompilerDeclContext decl_context
+  // ) override;
+
+  // static lldb::AccessType GetAccessTypeFromDWARF(uint32_t
+  // dwarf_accessibility);
+
+  // ------------------------------------------------------------------------ //
   //                                  Helpers                                 //
   // ------------------------------------------------------------------------ //
 
@@ -1709,7 +1842,91 @@ public:
 
   void PrintDeclContexts();
 
-  SymbolFile* GetSymbolFile() {return m_sym_file;};
+  SymbolFile* GetSymbolFile() { return m_sym_file; };
+
+  /// Returns an invalid compiler type if the byte size is not 1, 2, 4, 8, or 16
+  CompilerType IntTypeFromByteSize(uint8_t size) {
+    RustType* rt;
+    switch (size) {
+    case 1:
+      rt = primitive_types.i8();
+      break;
+    case 2:
+      rt = primitive_types.i16();
+      break;
+    case 4:
+      rt = primitive_types.i32();
+      break;
+    case 8:
+      rt = primitive_types.i64();
+      break;
+    case 16:
+      rt = primitive_types.i128();
+      break;
+    default:
+      return CompilerType();
+    }
+
+    return CompilerType(weak_from_this(), rt);
+  }
+
+  /// Returns an invalid compiler type if the byte size is not 1, 2, 4, 8, or 16
+  CompilerType UIntTypeFromByteSize(uint8_t size) {
+    RustType* rt;
+    switch (size) {
+    case 1:
+      rt = primitive_types.u8();
+      break;
+    case 2:
+      rt = primitive_types.u16();
+      break;
+    case 4:
+      rt = primitive_types.u32();
+      break;
+    case 8:
+      rt = primitive_types.u64();
+      break;
+    case 16:
+      rt = primitive_types.u128();
+      break;
+    default:
+      return CompilerType();
+    }
+
+    return CompilerType(weak_from_this(), rt);
+  }
+
+  /// Returns an invalid compiler type if the byte size is not 2, 4, 8, or 16
+  CompilerType FloatTypeFromByteSize(uint8_t size) {
+    RustType* rt;
+
+    switch (size) {
+    case 2:
+      rt = primitive_types.f16();
+      break;
+    case 4:
+      rt = primitive_types.f32();
+      break;
+    case 8:
+      rt = primitive_types.f64();
+      break;
+    case 16:
+      rt = primitive_types.f128();
+      break;
+    default:
+      return CompilerType();
+    }
+
+    return CompilerType(weak_from_this(), rt);
+  }
+
+  CompilerType BoolType() {
+    return CompilerType(weak_from_this(), primitive_types.Bool());
+  }
+
+  CompilerType CharType() {
+    return CompilerType(weak_from_this(), primitive_types.Char());
+  }
 
 private:
   uint64_t m_pointer_byte_size;
@@ -1731,6 +1948,10 @@ private:
   std::
       multimap<CompilerDeclContext, const lldb_private::plugin::dwarf::DWARFDIE>
           m_decl_ctx_to_die;
+
+  /// Cache of primitive types since they are used frequently, particularly in
+  /// expressions
+  RustPrimitives primitive_types;
 };
 } // namespace lldb_private
 

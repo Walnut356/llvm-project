@@ -21,34 +21,52 @@ class RustUserExpression : public UserExpression {
   static char ID;
 
 public:
-  RustUserExpression(ExecutionContextScope &exe_scope, llvm::StringRef expr,
-                     llvm::StringRef prefix, SourceLanguage language,
-                     ResultType desired_type,
-                     const EvaluateExpressionOptions &options)
-      : UserExpression(exe_scope, expr, prefix, language, desired_type,
-                       options) {}
+  RustUserExpression(
+      ExecutionContextScope& exe_scope,
+      llvm::StringRef expr,
+      llvm::StringRef prefix,
+      SourceLanguage language,
+      ResultType desired_type,
+      const EvaluateExpressionOptions& options
+  )
+      : UserExpression(
+            exe_scope,
+            expr,
+            prefix,
+            language,
+            desired_type,
+            options
+        ) {}
 
-  bool Parse(DiagnosticManager &diagnostic_manager, ExecutionContext &exe_ctx,
-             lldb_private::ExecutionPolicy execution_policy,
-             bool keep_result_in_memory, bool generate_debug_info) override;
+  bool Parse(
+      DiagnosticManager& diagnostic_manager,
+      ExecutionContext& exe_ctx,
+      lldb_private::ExecutionPolicy execution_policy,
+      bool keep_result_in_memory,
+      bool generate_debug_info
+  ) override;
 
   bool CanInterpret() override { return true; }
 
   // FIXME - what is this supposed to do.
   bool FinalizeJITExecution(
-      DiagnosticManager &diagnostic_manager, ExecutionContext &exe_ctx,
-      lldb::ExpressionVariableSP &result,
+      DiagnosticManager& diagnostic_manager,
+      ExecutionContext& exe_ctx,
+      lldb::ExpressionVariableSP& result,
       lldb::addr_t function_stack_bottom = LLDB_INVALID_ADDRESS,
-      lldb::addr_t function_stack_top = LLDB_INVALID_ADDRESS) override {
+      lldb::addr_t function_stack_top = LLDB_INVALID_ADDRESS
+  ) override {
     return true;
   }
 
 protected:
-  lldb::ExpressionResults
-  DoExecute(DiagnosticManager &diagnostic_manager, ExecutionContext &exe_ctx,
-            const EvaluateExpressionOptions &options,
-            lldb::UserExpressionSP &shared_ptr_to_me,
-            lldb::ExpressionVariableSP &result) override;
+  lldb::ExpressionResults DoExecute(
+      DiagnosticManager& diagnostic_manager,
+      ExecutionContext& exe_ctx,
+      const EvaluateExpressionOptions& options,
+      lldb::UserExpressionSP& shared_ptr_to_me,
+      lldb::ExpressionVariableSP& result
+  ) override;
 
 private:
   RustExpressionUP m_expr;

@@ -6,8 +6,10 @@ add_lldb_library(lldbPluginTypeSystemRust PLUGIN
     lldbSymbol
     lldbTarget
     lldbUtility
+    lldbPluginExpressionParserRust
     lldbPluginSymbolFileDWARF
     lldbPluginSymbolFilePDB
   LINK_COMPONENTS
+    DebugInfoPDB
     Support
 )

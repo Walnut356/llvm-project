@@ -64,6 +64,7 @@ using namespace lldb;
 using namespace lldb_private;
 using namespace lldb_private::dwarf;
 using namespace lldb_private::plugin::dwarf;
+using namespace llvm::dwarf;
 
 DWARFASTParserClang::DWARFASTParserClang(TypeSystemClang &ast)
     : DWARFASTParser(Kind::DWARFASTParserClang), m_ast(ast),
@@ -430,6 +431,8 @@ static std::string GetUnitName(const DWARFDIE &die) {
 TypeSP DWARFASTParserClang::ParseTypeFromDWARF(const SymbolContext &sc,
                                                const DWARFDIE &die,
                                                bool *type_is_new_ptr) {
+  printf("parsing type clang");
+
   if (type_is_new_ptr)
     *type_is_new_ptr = false;
 

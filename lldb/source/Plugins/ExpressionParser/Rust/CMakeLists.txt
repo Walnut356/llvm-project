@@ -2,11 +2,10 @@ if(NOT LLDB_BUILT_STANDALONE)
   set(tablegen_deps intrinsics_gen)
 endif()
 
-add_lldb_library(lldbPluginRustExpressionParser
-  RustUserExpression.cpp 
-  RustLex.cpp 
-  RustParse.cpp 
-  RustFunctionCaller.cpp
+add_lldb_library(lldbPluginExpressionParserRust
+  RustUserExpression.cpp
+  RustLex.cpp
+  RustParse.cpp
 
   LINK_LIBS
     lldbCore
