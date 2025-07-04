@@ -40,7 +40,6 @@
 #include "lldb/lldb-enumerations.h"
 
 class DWARFASTParserClang;
-class PDBASTParser;
 
 namespace clang {
 class FileManager;
@@ -522,7 +521,8 @@ public:
   // TypeSystem methods
   plugin::dwarf::DWARFASTParser *GetDWARFParser() override;
   PDBASTParser *GetPDBParser() override;
-  npdb::PdbAstBuilder *GetNativePDBParser() override;
+  npdb::NativePDBASTParser *GetNativePDBParser() override;
+  npdb::PdbAstBuilder* GetPdbAstBuilder();
 
   // TypeSystemClang callbacks for external source lookups.
   void CompleteTagDecl(clang::TagDecl *);

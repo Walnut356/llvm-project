@@ -95,6 +95,29 @@ like which variables to populate when printing a frame, scope qualifying certain
 type names, etc.
 
 ---
+PDBASTParser Notes
+---
+PDBASTParser looks pretty confusing to say the least, so I'm looking into ways
+to prefer the native PDB parser, or create a unified abstraction layer over the
+top of both. Having to implement 3 parsers for 1 type system seems a bit silly.
+
+---
+NativePDBASTParser Notes
+---
+`PdbSymUid` seems to be the `DWARFDIE` equivalent. It can be converted to/from
+more specific types:
+
+PdbSymCompilandId
+PdbCompileandSymId
+PdbGlobalSymId
+PdbTypeSymId
+PdbFieldListMemberId
+
+SymbolFileNativePDB::GetOrCreateType appears to store types by `PdbSymUid`, so
+`MakeType()` should use this value
+
+
+---
 TypeSystem Notes
 ---
 
@@ -114,26 +137,33 @@ it gets.
 #ifndef liblldb_TypeSystemRust_h_
 #define liblldb_TypeSystemRust_h_
 
-// #include "Plugins/ExpressionParser/Rust/RustUserExpression.h"
 #include "Plugins/ExpressionParser/Rust/RustUserExpression.h"
 #include "Plugins/SymbolFile/DWARF/DWARFASTParser.h"
 #include "Plugins/SymbolFile/DWARF/DWARFDebugInfoEntry.h"
 #include "Plugins/SymbolFile/DWARF/DWARFFormValue.h"
-#include "Plugins/SymbolFile/PDB/PDBASTParser.h"
+#include "Plugins/SymbolFile/NativePDB/PdbAstBuilder.h"
 
+#include "Plugins/SymbolFile/NativePDB/PdbSymUid.h"
 #include "lldb/Core/DumpDataExtractor.h"
 #include "lldb/Expression/UtilityFunction.h"
 #include "lldb/Symbol/CompilerType.h"
 #include "lldb/Symbol/TypeSystem.h"
 #include "lldb/lldb-enumerations.h"
+#include "lldb/lldb-types.h"
+#include "llvm/ADT/APInt.h"
 #include "llvm/BinaryFormat/Dwarf.h"
+#include "llvm/DebugInfo/CodeView/TypeIndex.h"
+#include "llvm/DebugInfo/CodeView/TypeRecord.h"
+#include <array>
 #include <memory>
 #include <optional>
+#include <unordered_map>
 #include <vector>
 
 namespace lldb_private {
 
 const ConstString UNIT_TYPE_NAME{"()"};
+const ConstString UNIT_TYPE_NAME_MSVC{"tuple$<>"};
 const ConstString I8_NAME{"i8"};
 const ConstString U8_NAME{"u8"};
 const ConstString I16_NAME{"i16"};
@@ -154,69 +184,188 @@ const ConstString F128_NAME{"f128"};
 const ConstString BOOL_NAME{"bool"};
 const ConstString CHAR_NAME{"char"};
 
+// used for std::visit
+template <class... Ts> struct overload : Ts... {
+  using Ts::operator()...;
+};
+
+template <class... Ts> overload(Ts...) -> overload<Ts...>;
+
 // -------------------------------------------------------------------------- //
 // -------------------------------------------------------------------------- //
 //                                 Rust Decls                                 //
 // -------------------------------------------------------------------------- //
 // -------------------------------------------------------------------------- //
 
-/// Wrapper around RustDecl and RustDecl context
-///
-/// RustDecl and RustDeclContext are the same size, so using std::variant
-/// doesn't waste space on either variant.
-///
-/// In rust terms:
-///
-/// ```
-/// enum RustDeclBase {
-///   RustDecl {
-///     type: CompilerType,
-///     name: ConstString,
-///     mangled: ConstString,
-///     full_name: ConstString,
-///     parent: *const RustDeclBase::RustDeclContext
-///   },
-///   RustDeclContext {
-///     child_decls: HashMap<ConstString, Arc<RustDeclBase>>,
-///     name: ConstString,
-///     mangled: ConstString,
-///     parent: *const RustDeclBase::RustDeclContext
-///   }
-///
-/// }
-/// ```
-struct RustDeclBase;
-// so stupid ---^
+// Declaration of a Rust symbol.
+struct RustDecl;
 
-/// TODO docs
-struct RustDeclContext {
+struct UnknownDecl {};
+
+struct CompUnitDecl {
+  llvm::DenseMap<ConstString, RustDecl*> children;
+};
+
+struct NamespaceDecl {
+  llvm::DenseMap<ConstString, RustDecl*> children;
+};
+
+struct FnDecl {
+  llvm::DenseMap<ConstString, RustDecl*> children;
+  CompilerType type;
+};
+
+struct BlockDecl {
+  llvm::DenseMap<ConstString, RustDecl*> children;
+};
+
+struct VarDecl {
+  CompilerType type;
+};
+
+struct ValDecl {
+  Scalar value;
+};
+
+/// Includes typedefs
+struct TypeDecl {
+  CompilerType type;
+};
+
+struct RustDecl {
+  ConstString name;
+  ConstString mangled;
+  ConstString full_name;
+  RustDecl* parent;
+
+  typedef std::variant<
+      UnknownDecl,
+      CompUnitDecl,
+      NamespaceDecl,
+      FnDecl,
+      BlockDecl,
+      VarDecl,
+      ValDecl,
+      TypeDecl>
+      DeclInner;
+
+  DeclInner variant;
+
   enum Kind {
-    CompileUnit,
+    Unknown,
+    CompUnit,
     Namespace,
-    Struct,
+    Fn,
+    Block,
+    Var,
+    Val,
+    Type,
   };
 
-  // This stores shared_ptr instead of unique_ptr because unique_ptr means no
-  // copy construction. std::variant ~requires copy construction from what i can
-  // tell?
-  llvm::DenseMap<ConstString, std::shared_ptr<RustDeclBase>> child_decls;
-  ConstString name;
-  ConstString full_name;
-  RustDeclContext* parent;
-  Kind kind;
+  RustDecl(
+      const ConstString& name,
+      const ConstString& mangled,
+      RustDecl* parent,
+      DeclInner variant
+  )
+      : name(name), mangled(mangled), parent(parent), variant(variant) {}
 
-  ~RustDeclContext() {}
+  CompUnitDecl* AsCompUnit() { return std::get_if<CompUnitDecl>(&variant); }
+  NamespaceDecl* AsNamespace() { return std::get_if<NamespaceDecl>(&variant); }
+  FnDecl* AsFn() { return std::get_if<FnDecl>(&variant); }
+  BlockDecl* AsBlock() { return std::get_if<BlockDecl>(&variant); }
+  VarDecl* AsVar() { return std::get_if<VarDecl>(&variant); }
+  ValDecl* AsVal() { return std::get_if<ValDecl>(&variant); }
+  TypeDecl* AsType() { return std::get_if<TypeDecl>(&variant); }
 
-  RustDeclBase* FindByName(const ConstString& name) {
-    if (child_decls.contains(name)) {
-      return child_decls[name].get();
+  bool IsCompUnit() { return std::holds_alternative<CompUnitDecl>(variant); }
+  bool IsNamespace() { return std::holds_alternative<NamespaceDecl>(variant); }
+  bool IsFn() { return std::holds_alternative<FnDecl>(variant); }
+  bool IsBlock() { return std::holds_alternative<BlockDecl>(variant); }
+  bool IsVar() { return std::holds_alternative<VarDecl>(variant); }
+  bool IsVal() { return std::holds_alternative<ValDecl>(variant); }
+  bool IsType() { return std::holds_alternative<TypeDecl>(variant); }
+
+  bool IsContext() {
+    switch (variant.index()) {
+    case CompUnit:
+    case Namespace:
+    case Fn:
+    case Block:
+      return true;
+    default:
+      return false;
+    }
+  }
+
+  llvm::DenseMap<ConstString, RustDecl*>* GetChildren() {
+    // jfc C++, get your shit together
+    const auto options = overload{
+        [](UnknownDecl& v) {
+          return static_cast<llvm::DenseMap<ConstString, RustDecl*>*>(nullptr);
+        },
+        [](CompUnitDecl& v) { return &v.children; },
+        [](NamespaceDecl& v) { return &v.children; },
+        [](FnDecl& v) { return &v.children; },
+        [](BlockDecl& v) { return &v.children; },
+        [](VarDecl& v) {
+          return static_cast<llvm::DenseMap<ConstString, RustDecl*>*>(nullptr);
+        },
+        [](ValDecl& v) {
+          return static_cast<llvm::DenseMap<ConstString, RustDecl*>*>(nullptr);
+        },
+        [](TypeDecl& v) {
+          return static_cast<llvm::DenseMap<ConstString, RustDecl*>*>(nullptr);
+        },
+    };
+
+    return std::visit(options, variant);
+  }
+
+  CompilerType GetType() {
+    const auto options = overload{
+        [](UnknownDecl& v) { return CompilerType(); },
+        [](CompUnitDecl& v) { return CompilerType(); },
+        [](NamespaceDecl& v) { return CompilerType(); },
+        [](FnDecl& v) { return v.type; },
+        [](BlockDecl& v) { return CompilerType(); },
+        [](VarDecl& v) { return v.type; },
+        [](ValDecl& v) {
+          return CompilerType();
+          // TODO
+          // switch (v.value.GetType()) {
+
+          // case Scalar::e_void:
+          // return CompilerType();
+          // case Scalar::e_int:
+
+          // case Scalar::e_float:
+          //   break;
+          // }
+        },
+        [](TypeDecl& v) { return v.type; },
+    };
+
+    return std::visit(options, variant);
+  }
+
+  void AddItem(RustDecl* decl) {
+    if (auto* children = GetChildren()) {
+      auto name = decl->name;
+      (*children)[name] = decl;
+    }
+  }
+
+  RustDecl* FindByName(const ConstString& name) {
+    if (auto* children = GetChildren()) {
+      if (children->contains(name)) {
+        return (*children)[name];
+      }
     }
 
     return nullptr;
   }
 
-  void AddItem(std::shared_ptr<RustDeclBase>&& item);
-
   ConstString QualifiedName() {
     if (!parent) {
       return name;
@@ -232,104 +381,6 @@ struct RustDeclContext {
       }
     }
     return full_name;
-  }
-};
-
-/// TODO docs
-struct RustDecl {
-  CompilerType type;
-  ConstString name;
-  ConstString mangled;
-  ConstString full_name;
-  RustDeclContext* parent;
-
-  RustDecl(
-      const ConstString& name,
-      const ConstString& mangled,
-      RustDeclContext* parent,
-      CompilerType type
-  )
-      : type(type), name(name), mangled(mangled), parent(parent) {
-    assert(parent);
-  }
-
-  ~RustDecl() {}
-
-  ConstString QualifiedName() {
-    if (!parent) {
-      return name;
-    }
-    if (!full_name) {
-      ConstString basename = parent->QualifiedName();
-      if (basename) {
-        std::string qual =
-            std::string(basename.AsCString()) + "::" + name.AsCString();
-        full_name = ConstString(qual.c_str());
-      } else {
-        full_name = name;
-      }
-    }
-    return full_name;
-  }
-};
-
-struct RustDeclBase {
-public:
-  enum Kind {
-    Decl,
-    DeclContext,
-  };
-
-  // no copy constructors allowed because RustDeclContext's chilren are stored
-  // as unique pointers
-  // RustDeclBase(const RustDeclBase&) = delete;
-  // RustDeclBase& operator=(const RustDeclBase&) = delete;
-
-  // RustDeclBase(
-  //     const ConstString& name,
-  //     RustDeclContext* parent,
-  //     RustDeclContext::Kind kind
-  // ) {
-  //   std::variant<RustDecl, RustDeclContext> thing =
-  //       RustDeclContext{llvm::DenseMap(), name, ConstString(), parent, kind};
-  // }
-
-  ~RustDeclBase() {}
-
-  std::variant<RustDecl, RustDeclContext> variant;
-
-  RustDecl* AsDecl() { return std::get_if<RustDecl>(&variant); }
-
-  RustDeclContext* AsDeclContext() {
-    return std::get_if<RustDeclContext>(&variant);
-  }
-
-  bool IsDecl() { return variant.index() == Decl; }
-  bool IsDeclContext() { return variant.index() == DeclContext; }
-
-  ConstString Name() {
-    switch (variant.index()) {
-    case Decl:
-      return std::get<RustDecl>(variant).name;
-    case DeclContext:
-      return std::get<RustDeclContext>(variant).name;
-    default:
-      assert(0);
-      return ConstString();
-    }
-  }
-
-  /// Returns the parent context of this Decl. Cannot fail.
-  RustDeclContext* Context() {
-    switch (variant.index()) {
-    case Decl:
-      return AsDecl()->parent;
-    case DeclContext:
-      return AsDeclContext()->parent;
-    default:
-      assert(0);
-      return nullptr;
-    }
   }
 };
 
@@ -351,7 +402,6 @@ struct BasicAttributes {
 /// Contains the relevant dwarf attribute tags for `DW_TAG_member_type` DIE
 /// parsing
 struct FieldAttributes {
-  plugin::dwarf::DWARFFormValue encoding;
   uint64_t byte_align;
   uint64_t byte_offset;
   /// The name of the field itself
@@ -416,7 +466,11 @@ struct RustIndirection {
 /// Represents Structs, Tuples, and Unions
 struct RustAggregate {
   std::vector<FieldAttributes> fields;
-  std::vector<CompilerType> template_args;
+  // SAFETY: the StringRefs are derived directly from the ConstString type name
+  // of either the compiler type, or the containing type, thus are safe to hold
+  std::vector<std::pair<llvm::StringRef, std::optional<CompilerType>>>
+      template_args;
+  std::vector<std::pair<ConstString, CompilerType>> static_fields;
   uint64_t align;
   AggregateKind kind;
 };
@@ -425,6 +479,19 @@ struct EnumVariant {
   CompilerType underlying_type;
   ConstString name;
 };
+
+/// u128.0 is the low bits, u128.1 is the high bits
+/// used for RustSumType discriminant values, since types such as
+/// `NonZero<u128>` can have a 128-bit discriminant. C/C++ seemingly don't have
+/// a uint128_t so it is what it is.
+///
+/// I deliberately avoid using llvm::APInt because all bytes after the first u64
+/// are allocated, which is a giant waste when we know exactly the size of int
+/// we want.
+///
+/// I use std::pair instead of a bespoke u128 struct because it'll work with
+/// llvm::densemap without me doing any extra work.
+typedef std::pair<uint64_t, uint64_t> u128;
 
 // TODO make this compatible with existing rust synthetic providers
 
@@ -442,13 +509,19 @@ struct EnumVariant {
 struct RustSumType {
   std::vector<EnumVariant> variants;
   /// For a given discr, returns the index of the variant it corresponds to.
-  llvm::DenseMap<uint64_t, uint64_t> discr_map;
+  /// We have to use llvm::APInt here because types like `NonZero<u128>` have
+  /// 128-bit
+  llvm::DenseMap<std::pair<uint64_t, uint64_t>, uint64_t> discr_map;
   CompilerType discr_type;
   /// The index of the variant that can take a range of discr values, if there
   /// is one
   std::optional<uint64_t> untagged_variant;
 
   CompilerType GetVariant(uint64_t discr) {
+    return GetVariant(std::make_pair(discr, 0));
+  }
+
+  CompilerType GetVariant(std::pair<uint64_t, uint64_t> discr) {
     if (discr_map.contains(discr)) {
       return variants[discr_map[discr]].underlying_type;
     }
@@ -462,7 +535,7 @@ struct RustSumType {
 
 /// Represents a C-Style enum. For sum types, see RustSumType
 struct RustCStyleEnumType {
-  llvm::DenseMap<uint64_t, std::string> variants;
+  llvm::DenseMap<std::optional<uint64_t>, ConstString> variants;
   CompilerType underlying_type;
 };
 
@@ -622,7 +695,7 @@ public:
       uint64_t align,
       AggregateKind kind
   ) {
-    return RustType{name, size, RustAggregate{{}, {}, align, kind}};
+    return RustType{name, size, RustAggregate{{}, {}, {}, align, kind}};
   }
 
   static RustType NewSumType(
@@ -636,7 +709,7 @@ public:
         size,
         RustSumType{
             variants,
-            llvm::DenseMap<uint64_t, uint64_t>(),
+            llvm::DenseMap<std::pair<uint64_t, uint64_t>, uint64_t>(),
             discr_type,
             {}
         }
@@ -649,7 +722,7 @@ public:
         name,
         underlying_type.GetByteSize(nullptr).value_or(0),
         RustCStyleEnumType{
-            llvm::DenseMap<uint64_t, std::string>(),
+            llvm::DenseMap<std::optional<uint64_t>, ConstString>(),
             underlying_type,
         }
     };
@@ -672,7 +745,7 @@ public:
   ) {
     return RustType{
         name,
-        0, // should this be pointer sized?
+        0, // TODO should this be pointer sized?
         RustFunctionType{args, template_args, return_type}
     };
   }
@@ -820,6 +893,9 @@ class RustPrimitives {
       std::make_unique<RustType>(RustType{BOOL_NAME, 1, RustBool{}});
   std::unique_ptr<RustType> char_type =
       std::make_unique<RustType>(RustType{CHAR_NAME, 4, RustChar{}});
+  std::unique_ptr<RustType> unit_type = std::make_unique<RustType>(RustType{
+      RustType::NewAggregate(UNIT_TYPE_NAME, 0, 1, AggregateKind::Tuple)
+  });
 
 public:
   void SetPointerByteSize(uint64_t size) {
@@ -845,6 +921,7 @@ public:
   RustType* f128() { return float_types[3].get(); }
   RustType* Bool() { return bool_type.get(); }
   RustType* Char() { return char_type.get(); }
+  RustType* unit() { return unit_type.get(); }
 };
 
 const ConstString SUM_TYPE_DISCR_NAME = ConstString{"tag"};
@@ -862,9 +939,11 @@ const ConstString SUM_TYPE_DISCR_NAME = ConstString{"tag"};
 //                                                                            //
 // -------------------------------------------------------------------------- //
 
+/// Primary hub for Rust language support. Doesn't "do much" by itself, but
+/// inherits the parsers for the various debug file formats.
 class TypeSystemRust : public TypeSystem,
-                       public plugin::dwarf::DWARFASTParser
-                       /*public PDBASTParser */ {
+                       public plugin::dwarf::DWARFASTParser,
+                       public npdb::NativePDBASTParser {
 public:
   // ------------------------------------------------------------------------ //
   //                         Constructors/Destructors                         //
@@ -934,8 +1013,7 @@ public:
   /// implementation has it as a parent class, so it just returns itself.
   PDBASTParser* GetPDBParser() override { return nullptr; }
 
-  /// unused
-  npdb::PdbAstBuilder* GetNativePDBParser() override { return nullptr; }
+  npdb::NativePDBASTParser* GetNativePDBParser() override { return this; }
 
   // ------------------------------ Symbol File ----------------------------- //
 
@@ -1737,7 +1815,8 @@ public:
 
   /// Returns a tuple containing the DWARFFormValue representing the
   /// `DW_AT_type`, the byte alignment, the byte offset, and the field name
-  FieldAttributes ParseFieldAttributes(const plugin::dwarf::DWARFDIE& die);
+  std::pair<FieldAttributes, plugin::dwarf::DWARFFormValue>
+  ParseFieldAttributes(const plugin::dwarf::DWARFDIE& die);
 
   /// Called inside `TypeSystemRust::ParseStructureType()` to parse the
   /// individual fields of a struct or tuple. For enum field parsing, see
@@ -1747,7 +1826,8 @@ public:
   void ParseStructFields(
       const plugin::dwarf::DWARFDIE& die,
       std::vector<FieldAttributes>& fields,
-      std::vector<CompilerType>& template_args,
+      std::vector<std::pair<llvm::StringRef, std::optional<CompilerType>>>&
+          template_args,
       bool is_tuple
   );
 
@@ -1781,6 +1861,92 @@ public:
   //                          PDBASTParser Interface                          //
   // ------------------------------------------------------------------------ //
 
+  lldb::TypeSP ParseTypeFromPDB(npdb::PdbTypeSymId type) override;
+
+  lldb::TypeSP ParseTypedefDecl(const npdb::PdbGlobalSymId& symbol) override;
+
+  ConstString ConstructDemangledNameFromPDB(const npdb::PdbSymUid& symbol
+  ) override;
+
+  Function* ParseFunctionFromPDB(npdb::PdbCompilandSymId func_id) override;
+
+  bool CompleteTypeFromPDB(
+      const npdb::PdbTypeSymId symbol,
+      Type* type,
+      CompilerType& compiler_type
+  ) override;
+
+  CompilerDecl GetDeclForUIDFromPDB(const npdb::PdbSymUid& symbol) override;
+
+  CompilerDeclContext GetDeclContextForUIDFromPDB(const npdb::PdbSymUid& symbol
+  ) override;
+
+  CompilerDeclContext
+  GetDeclContextContainingUIDFromPDB(const npdb::PdbSymUid& symbol) override;
+
+  void
+  EnsureAllSymbolsInDeclContextHaveBeenParsed(CompilerDeclContext decl_context
+  ) override;
+
+  std::string GetPDBClassTemplateParams(const npdb::PdbTypeSymId& type
+  ) override;
+
+  // --------------------------- NativePDB Helpers -------------------------- //
+
+  /// Parses builtin and pointer types from PDB data. Equivalent to DWARF's
+  /// ParseBasicType
+  lldb::TypeSP ParseSimpleTypePDB(npdb::PdbTypeSymId type);
+
+  /// For the moment, just returns the underlying type.
+  lldb::TypeSP ParseModifierTypePDB(llvm::codeview::ModifierRecord& modifier);
+
+  lldb::TypeSP ParsePointerTypePDB(
+      npdb::PdbTypeSymId type,
+      llvm::codeview::PointerRecord& pointer
+  );
+
+  lldb::TypeSP ParseAggregateTypePDB(
+      npdb::PdbTypeSymId type,
+      const llvm::codeview::TagRecord& record,
+      uint32_t size
+  );
+
+  /// Fills the given `fields` vector with the parsed child-fields of the given
+  /// record. Recurses into `ParseTypeFromPDB` for field types
+  void ParseFieldListPDB(
+      const llvm::codeview::TagRecord& record,
+      std::vector<FieldAttributes>& fields,
+      std::vector<std::pair<ConstString, CompilerType>>& static_fields
+  );
+
+  lldb::TypeSP ParseEnumTypePDB(
+      npdb::PdbTypeSymId type,
+      const llvm::codeview::EnumRecord& record
+  );
+
+  CompilerType ParseSumTypePDB(
+      npdb::PdbTypeSymId type,
+      const llvm::codeview::TagRecord& record,
+      uint32_t size
+  );
+
+  lldb::TypeSP ParseFunctionTypePDB(
+      npdb::PdbTypeSymId type,
+      llvm::codeview::ProcedureRecord pr
+  );
+
+  RustDecl* CreateFunctionDecl(npdb::PdbCompilandSymId symbol);
+  RustDecl* CreateVariableDecl(
+      npdb::PdbCompilandSymId scope_id,
+      npdb::PdbCompilandSymId var_id
+  );
+
+  void ParseBlockChildren(npdb::PdbCompilandSymId block_id);
+
+  ConstString NormalizeMSVCTypeName(llvm::StringRef name);
+
+  void FillIndirectionTypes(CompilerType type, lldb::user_id_t type_idx);
+
   // lldb::TypeSP ParseTypeFromSymbol(
   //     const lldb_private::SymbolContext& sc,
   //     const llvm::pdb::PDBSymbol& type,
@@ -1788,7 +1954,8 @@ public:
   // ) override;
 
   // lldb_private::ConstString
-  // ConstructDemangledNameFromSymbol(const llvm::pdb::PDBSymbol& symbol) override;
+  // ConstructDemangledNameFromSymbol(const llvm::pdb::PDBSymbol& symbol)
+  // override;
 
   // lldb_private::Function* ParseFunctionFromSymbol(
   //     lldb_private::CompileUnit& comp_unit,
@@ -1802,37 +1969,46 @@ public:
   //     lldb_private::CompilerType& compiler_type
   // ) override;
 
-  // lldb_private::CompilerDecl GetDeclForSymbol(const llvm::pdb::PDBSymbol& symbol
-  // ) override;
+  // lldb_private::CompilerDecl GetDeclForSymbol(const llvm::pdb::PDBSymbol&
+  // symbol ) override;
 
   // lldb_private::CompilerDeclContext
   // GetDeclContextForSymbol(const llvm::pdb::PDBSymbol& symbol) override;
 
   // lldb_private::CompilerDeclContext
-  // GetDeclContextContainingSymbol(const llvm::pdb::PDBSymbol& symbol) override;
+  // GetDeclContextContainingSymbol(const llvm::pdb::PDBSymbol& symbol)
+  // override;
 
   // // virtual void EnsureAllDIEsInDeclContextHaveBeenParsed(
   // //     CompilerDeclContext decl_context) = 0;
 
-  // // virtual std::string GetDIEClassTemplateParams(const DWARFDIE &die) = 0;
+  // // virtual std::string GetDIEClassTemplateParams(const DWARFDIE &die) =
+  // 0;
 
   // lldb_private::Type* GetTypeForSymbol(const llvm::pdb::PDBSymbol& die);
 
   // void
-  // ParseDeclsForDeclContext(const lldb_private::CompilerDeclContext decl_context
-  // ) override;
+  // ParseDeclsForDeclContext(const lldb_private::CompilerDeclContext
+  // decl_context ) override;
 
   // static lldb::AccessType GetAccessTypeFromDWARF(uint32_t
   // dwarf_accessibility);
 
-  // ------------------------------------------------------------------------ //
-  //                                  Helpers                                 //
-  // ------------------------------------------------------------------------ //
+  // ------------------------------------------------------------------------
+  // //
+  //                                  Helpers //
+  // ------------------------------------------------------------------------
+  // //
 
   /// Returns a type name with its scope qualifiers. E.g. "Bar" ->
   /// "example::Foo::Bar"
   ConstString
   QualifyTypeName(const ConstString& name, const plugin::dwarf::DWARFDIE& die);
+
+  void TemplateArgsFromTypeName(
+      const llvm::StringRef name,
+      std::vector<CompilerType>& template_args
+  );
 
   CompilerDecl GetDecl(
       CompilerDeclContext parent,
@@ -1844,7 +2020,8 @@ public:
 
   SymbolFile* GetSymbolFile() { return m_sym_file; };
 
-  /// Returns an invalid compiler type if the byte size is not 1, 2, 4, 8, or 16
+  /// Returns an invalid compiler type if the byte size is not 1, 2, 4, 8, or
+  /// 16
   CompilerType IntTypeFromByteSize(uint8_t size) {
     RustType* rt;
     switch (size) {
@@ -1870,7 +2047,8 @@ public:
     return CompilerType(weak_from_this(), rt);
   }
 
-  /// Returns an invalid compiler type if the byte size is not 1, 2, 4, 8, or 16
+  /// Returns an invalid compiler type if the byte size is not 1, 2, 4, 8, or
+  /// 16
   CompilerType UIntTypeFromByteSize(uint8_t size) {
     RustType* rt;
     switch (size) {
@@ -1932,7 +2110,7 @@ private:
   uint64_t m_pointer_byte_size;
 
   /// Compile unit context, used to store all DW_TAG_compile_unit Decls
-  std::unique_ptr<RustDeclContext> m_compile_unit_ctx;
+  std::unique_ptr<RustDecl> m_compile_unit_ctx;
 
   lldb::TargetWP m_target_wp;
 
@@ -1952,6 +2130,13 @@ private:
   /// Cache of primitive types since they are used frequently, particularly in
   /// expressions
   RustPrimitives primitive_types;
+
+  llvm::DenseMap<lldb::user_id_t, RustDecl*> m_uid_to_decl;
+  llvm::DenseMap<lldb::user_id_t, RustType*> m_uid_to_type;
+  std::multimap<CompilerDeclContext, lldb::user_id_t> m_decl_ctx_to_uid;
+  llvm::DenseMap<llvm::StringRef, ConstString> msvc_normalization_cache;
+  llvm::once_flag m_parse_functions_and_non_local_vars;
+  llvm::once_flag m_parse_all_types;
 };
 } // namespace lldb_private
 

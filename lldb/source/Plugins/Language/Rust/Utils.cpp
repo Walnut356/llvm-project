@@ -119,11 +119,36 @@ bool RustCollectionSummary(
   if (size > 0) {
     for (uint32_t i = 0; i < size - 1; ++i) {
       auto child_reg = valobj.GetChildAtIndex(i);
-      auto child = child_reg->GetSyntheticValue();
-      if (!child) {
-        child = child_reg;
+      auto child = child_reg;
+      if (child_reg) {
+        if (auto c = child_reg->GetSyntheticValue()) {
+          child = c;
+        }
       }
 
+      if (child) {
+        auto* summary = child->GetSummaryAsCString();
+        if (!summary) {
+          summary = child->GetValueAsCString();
+        }
+        if (!summary) {
+          summary = "{...}";
+        }
+        stream.PutCString(summary);
+        stream.PutCString(", ");
+      } else {
+        stream.PutCString("<cannot access child>");
+      }
+    }
+    auto child_reg = valobj.GetChildAtIndex(size - 1);
+    auto child = child_reg;
+    if (child_reg) {
+      if (auto c = child_reg->GetSyntheticValue()) {
+        child = c;
+      }
+    }
+
+    if (child) {
       auto* summary = child->GetSummaryAsCString();
       if (!summary) {
         summary = child->GetValueAsCString();
@@ -131,26 +156,11 @@ bool RustCollectionSummary(
       if (!summary) {
         summary = "{...}";
       }
+
       stream.PutCString(summary);
-      stream.PutCString(", ");
+    } else {
+      stream.PutCString("<cannot access child>");
     }
-
-    auto last_reg = valobj.GetChildAtIndex(size - 1);
-
-    auto last = last_reg->GetSyntheticValue();
-    if (!last) {
-      last = last_reg;
-    }
-
-    auto* summary = last->GetSummaryAsCString();
-    if (!summary) {
-      summary = last->GetValueAsCString();
-    }
-    if (!summary) {
-      summary = "{...}";
-    }
-
-    stream.PutCString(summary);
   }
 
   stream.PutChar(']');
@@ -206,6 +216,44 @@ bool RustIndirectionSummary(
   }
 
   stream.PutCString(summary);
+
+  return true;
+}
+
+bool PrintableByteSummary(
+    ValueObject& valobj,
+    Stream& stream,
+    const TypeSummaryOptions& summary_options
+) {
+  uint64_t value = valobj.GetValueAsUnsigned(0);
+  switch (value) {
+  case '\n':
+    stream.PutCString("'\\n'");
+    break;
+  case '\r':
+    stream.PutCString("'\\r'");
+    break;
+  case '\t':
+    stream.PutCString("'\\t'");
+    break;
+  case '\\':
+    stream.PutCString("'\\\\'");
+    break;
+  case '\0':
+    stream.PutCString("'\\0'");
+    break;
+  case '\'':
+    stream.PutCString("'\\''");
+    break;
+
+  default:
+    if (value < 128 && isprint(value)) {
+      stream.Printf("'%c'", char(value));
+    } else {
+      stream.Printf("'\\u{%x}'", unsigned(value));
+    }
+    break;
+  }
 
   return true;
 }

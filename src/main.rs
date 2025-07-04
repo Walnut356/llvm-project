@@ -156,7 +156,7 @@ fn main() {
 
     let large_discr = NonZeroU128::new(255);
 
-    dbg!(GLOBAL_VAR);
+    unsafe {dbg!(GLOBAL_MUT)};
     // let mut buf = String::new();
 
     // stdin().read_line(&mut buf).unwrap();

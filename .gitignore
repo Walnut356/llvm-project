@@ -74,3 +74,4 @@ pythonenv*
 _build
 target
 rust-toolchain
+/zz_temp/

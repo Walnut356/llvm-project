@@ -14,6 +14,7 @@
 #ifndef LLVM_ADT_DENSEMAPINFO_H
 #define LLVM_ADT_DENSEMAPINFO_H
 
+#include <optional>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -319,6 +320,21 @@ struct DenseMapInfo<Enum, std::enable_if_t<std::is_enum_v<Enum>>> {
   }
 
   static bool isEqual(const Enum &LHS, const Enum &RHS) { return LHS == RHS; }
+};
+
+// Provide DenseMapInfo for std::optional<T> where T implements DenseMapInfo.
+template<typename T> struct DenseMapInfo<std::optional<T>> {
+  static inline std::optional<T> getEmptyKey() { return std::nullopt; }
+  static inline std::optional<T> getTombstoneKey() { return std::nullopt; }
+
+  static unsigned getHashValue(const std::optional<T>& Val) {
+    return DenseMapInfo<T>::getHashValue(Val.value());
+  }
+
+  static bool isEqual(const std::optional<T>& LHS,
+                      const std::optional<T>& RHS) {
+    return LHS == RHS;
+  }
 };
 } // end namespace llvm
 

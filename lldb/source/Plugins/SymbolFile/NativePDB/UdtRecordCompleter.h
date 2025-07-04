@@ -11,17 +11,17 @@
 
 #include "PdbAstBuilder.h"
 #include "PdbSymUid.h"
-#include "Plugins/ExpressionParser/Clang/ClangASTImporter.h"
+// #include "Plugins/ExpressionParser/Clang/ClangASTImporter.h"
 #include "llvm/DebugInfo/CodeView/CVRecord.h"
 #include "llvm/DebugInfo/CodeView/TypeRecord.h"
 #include "llvm/DebugInfo/CodeView/TypeVisitorCallbacks.h"
 #include <optional>
 
-namespace clang {
-class CXXBaseSpecifier;
-class QualType;
-class TagDecl;
-} // namespace clang
+// namespace clang {
+// class CXXBaseSpecifier;
+// class QualType;
+// class TagDecl;
+// } // namespace clang
 
 namespace llvm {
 namespace pdb {

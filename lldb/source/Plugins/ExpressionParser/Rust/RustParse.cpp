@@ -474,8 +474,8 @@ bool RustPath::GetDeclContext(
 
   if (!m_relative || m_self || m_supers > 0) {
     for (int i = 0; !m_relative || i < m_supers; ++i) {
-      auto* parent = static_cast<RustDeclBase*>(decl_ctx.GetOpaqueDeclContext())
-                         ->Context();
+      auto* parent =
+          static_cast<RustDecl*>(decl_ctx.GetOpaqueDeclContext())->parent;
       CompilerDeclContext next = CompilerDeclContext(ast, parent);
       // CompilerDeclContext next = ast->GetDeclContextDeclContext(decl_ctx);
       if (next.GetName().IsEmpty()) {
@@ -553,7 +553,7 @@ bool RustPath::FindDecl(
   }
 
   auto* parent =
-      static_cast<RustDeclBase*>(decl_ctx.GetOpaqueDeclContext())->Context();
+      static_cast<RustDecl*>(decl_ctx.GetOpaqueDeclContext())->parent;
 
   // Construct the fully-qualified name.
   std::vector<ConstString> fullname;

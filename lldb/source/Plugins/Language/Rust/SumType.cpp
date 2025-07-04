@@ -16,6 +16,7 @@
 #include "lldb/Utility/ConstString.h"
 #include "lldb/lldb-enumerations.h"
 #include "lldb/lldb-forward.h"
+#include "llvm/Support/Error.h"
 #include <cstdio>
 #include <optional>
 
@@ -54,13 +55,27 @@ ChildCacheState SumTypeSyntheticFrontEnd::Update() {
   if (!m_backend.GetChildMemberWithName("$discr$")) {
     assert(0);
   }
-  bool success = false;
-  uint64_t discr = m_backend.GetChildMemberWithName("$discr$")
-                       ->GetValueAsUnsigned(0, &success);
+  // bool success = false;
+  auto maybe_val =
+      m_backend.GetChildMemberWithName("$discr$")->GetValueAsAPSInt();
 
-  if (!success) {
+  if (!maybe_val) {
     assert(0);
   }
+
+  auto val = maybe_val->extend(128);
+  std::pair<uint64_t, uint64_t> discr;
+
+  discr.first = val.getLoBits(64).getZExtValue();
+  discr.second = val.getHiBits(64).getZExtValue();
+  // } else {
+  //   // everything else
+  //   discr.first = val.ULongLong();
+  // }
+
+  // if (!success) {
+  //   assert(0);
+  // }
 
   CompilerType t = m_backend.GetCompilerType();
 
@@ -105,16 +120,26 @@ SyntheticChildrenFrontEnd* RustSumTypeSyntheticFrontEndCreator(
   return new lldb_private::formatters::SumTypeSyntheticFrontEnd(valobj_sp);
 }
 
-bool RustSumTypeSummary(
+static bool RustSumTypeSummary(
     ValueObject& valobj,
     Stream& stream,
     const TypeSummaryOptions& summary_options
 ) {
   // accessing the SyntheticFrontEnd isn't trivial here
 
-  uint64_t discr = valobj.GetNonSyntheticValue()
+  auto maybe_val = valobj.GetNonSyntheticValue()
                        ->GetChildMemberWithName("$discr$")
-                       ->GetValueAsUnsigned(0);
+                       ->GetValueAsAPSInt();
+
+  if (!maybe_val) {
+    assert(0);
+  }
+
+  auto val = maybe_val->extend(128);
+  std::pair<uint64_t, uint64_t> discr;
+
+  discr.first = val.getLoBits(64).getZExtValue();
+  discr.second = val.getHiBits(64).getZExtValue();
 
   auto* rt =
       static_cast<RustType*>(valobj.GetCompilerType().GetOpaqueQualType());

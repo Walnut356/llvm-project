@@ -41,4 +41,10 @@ bool RustIndirectionSummary(
     const lldb_private::TypeSummaryOptions& summary_options
 );
 
+bool PrintableByteSummary(
+    lldb_private::ValueObject& valobj,
+    lldb_private::Stream& stream,
+    const lldb_private::TypeSummaryOptions& summary_options
+);
+
 #endif

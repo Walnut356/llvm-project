@@ -17,9 +17,12 @@
 #include "llvm/DebugInfo/CodeView/SymbolRecord.h"
 #include "llvm/DebugInfo/PDB/PDBTypes.h"
 
+
 #include "CompileUnitIndex.h"
 #include "PdbIndex.h"
 #include "PdbAstBuilder.h"
+#include "lldb/lldb-enumerations.h"
+#include "lldb/lldb-types.h"
 #include <optional>
 
 namespace clang {
@@ -157,10 +160,38 @@ public:
 
   PdbIndex &GetIndex() { return *m_index; };
 
-  void DumpClangAST(Stream &s) override;
+  // void DumpClangAST(Stream &s) override;
 
   std::optional<llvm::codeview::TypeIndex>
   GetParentType(llvm::codeview::TypeIndex ti);
+
+  /// Given a UID, attempts to return the language that that UID is associated with.
+  lldb::LanguageType LanguageForUid(lldb::user_id_t uid);
+
+  llvm::DenseMap<ConstString, lldb::TypeSP>& GetNameToTypeMap() {
+    return m_name_to_type;
+  }
+
+  void InsertNameToType(lldb::TypeSP type) {
+    // printf("%s\n", type->GetName().AsCString());
+    m_name_to_type[type->GetName()] = type;
+  }
+
+  llvm::DenseMap<lldb::user_id_t, lldb::TypeSP>& GetTypeMap() {
+    return m_types;
+  }
+
+  bool ParsingStarted(lldb::user_id_t uid) {
+    return m_parsing_started.contains(uid);
+  }
+
+  void StartParsing(lldb::user_id_t uid) {
+    m_parsing_started.insert(uid);
+  }
+
+  void DoneParsing(lldb::user_id_t uid) {
+    m_parsing_started.erase(uid);
+  }
 
 private:
   struct LineTableEntryComparator {
@@ -191,56 +222,63 @@ private:
   void FindTypesByName(llvm::StringRef name, uint32_t max_matches,
                        TypeMap &types);
 
-  lldb::TypeSP CreateModifierType(PdbTypeSymId type_id,
-                                  const llvm::codeview::ModifierRecord &mr,
-                                  CompilerType ct);
-  lldb::TypeSP CreatePointerType(PdbTypeSymId type_id,
-                                 const llvm::codeview::PointerRecord &pr,
-                                 CompilerType ct);
-  lldb::TypeSP CreateSimpleType(llvm::codeview::TypeIndex ti, CompilerType ct);
-  lldb::TypeSP CreateTagType(PdbTypeSymId type_id,
-                             const llvm::codeview::ClassRecord &cr,
-                             CompilerType ct);
-  lldb::TypeSP CreateTagType(PdbTypeSymId type_id,
-                             const llvm::codeview::EnumRecord &er,
-                             CompilerType ct);
-  lldb::TypeSP CreateTagType(PdbTypeSymId type_id,
-                             const llvm::codeview::UnionRecord &ur,
-                             CompilerType ct);
-  lldb::TypeSP CreateArrayType(PdbTypeSymId type_id,
-                               const llvm::codeview::ArrayRecord &ar,
-                               CompilerType ct);
-  lldb::TypeSP CreateFunctionType(PdbTypeSymId type_id,
-                                  const llvm::codeview::MemberFunctionRecord &pr,
-                                  CompilerType ct);
-  lldb::TypeSP CreateProcedureType(PdbTypeSymId type_id,
-                                   const llvm::codeview::ProcedureRecord &pr,
-                                   CompilerType ct);
-  lldb::TypeSP CreateClassStructUnion(PdbTypeSymId type_id,
-                                      const llvm::codeview::TagRecord &record,
-                                      size_t size, CompilerType ct);
+  // lldb::TypeSP CreateModifierType(
+  //     PdbTypeSymId type_id,
+  //     const llvm::codeview::ModifierRecord& mr,
+  //     CompilerType ct,
+  //     CompileUnit& comp_unit
+  // );
+  // lldb::TypeSP CreatePointerType(
+  //     PdbTypeSymId type_id,
+  //     const llvm::codeview::PointerRecord& pr,
+  //     CompilerType ct,
+  //     CompileUnit& comp_unit
+  // );
+  // lldb::TypeSP CreateSimpleType(llvm::codeview::TypeIndex ti, CompilerType ct);
+  // lldb::TypeSP CreateTagType(PdbTypeSymId type_id,
+  //                            const llvm::codeview::ClassRecord &cr,
+  //                            CompilerType ct);
+  // lldb::TypeSP CreateTagType(PdbTypeSymId type_id,
+  //                            const llvm::codeview::EnumRecord &er,
+  //                            CompilerType ct);
+  // lldb::TypeSP CreateTagType(PdbTypeSymId type_id,
+  //                            const llvm::codeview::UnionRecord &ur,
+  //                            CompilerType ct);
+  // lldb::TypeSP CreateArrayType(PdbTypeSymId type_id,
+  //                              const llvm::codeview::ArrayRecord &ar,
+  //                              CompilerType ct);
+  // lldb::TypeSP CreateFunctionType(PdbTypeSymId type_id,
+  //                                 const llvm::codeview::MemberFunctionRecord &pr,
+  //                                 CompilerType ct);
+  // lldb::TypeSP CreateProcedureType(PdbTypeSymId type_id,
+  //                                  const llvm::codeview::ProcedureRecord &pr,
+  //                                  CompilerType ct);
+  // lldb::TypeSP CreateClassStructUnion(PdbTypeSymId type_id,
+  //                                     const llvm::codeview::TagRecord &record,
+  //                                     size_t size, CompilerType ct);
 
   lldb::FunctionSP GetOrCreateFunction(PdbCompilandSymId func_id,
                                        CompileUnit &comp_unit);
   lldb::CompUnitSP GetOrCreateCompileUnit(const CompilandIndexItem &cci);
-  lldb::TypeSP GetOrCreateType(PdbTypeSymId type_id);
-  lldb::TypeSP GetOrCreateType(llvm::codeview::TypeIndex ti);
+  lldb::TypeSP GetOrCreateType(PdbTypeSymId type_id, CompileUnit& comp_unit);
+  lldb::TypeSP GetOrCreateType(llvm::codeview::TypeIndex ti,
+                               CompileUnit &comp_unit);
   lldb::VariableSP GetOrCreateGlobalVariable(PdbGlobalSymId var_id);
   Block &GetOrCreateBlock(PdbCompilandSymId block_id);
   lldb::VariableSP GetOrCreateLocalVariable(PdbCompilandSymId scope_id,
                                             PdbCompilandSymId var_id,
                                             bool is_param);
-  lldb::TypeSP GetOrCreateTypedef(PdbGlobalSymId id);
+  lldb::TypeSP GetOrCreateTypedef(PdbGlobalSymId id, CompileUnit &comp_unit);
 
   lldb::FunctionSP CreateFunction(PdbCompilandSymId func_id,
                                   CompileUnit &comp_unit);
   Block &CreateBlock(PdbCompilandSymId block_id);
   lldb::VariableSP CreateLocalVariable(PdbCompilandSymId scope_id,
                                        PdbCompilandSymId var_id, bool is_param);
-  lldb::TypeSP CreateTypedef(PdbGlobalSymId id);
+  lldb::TypeSP CreateTypedef(PdbGlobalSymId id, CompileUnit &comp_unit);
   lldb::CompUnitSP CreateCompileUnit(const CompilandIndexItem &cci);
   lldb::TypeSP CreateType(PdbTypeSymId type_id, CompilerType ct);
-  lldb::TypeSP CreateAndCacheType(PdbTypeSymId type_id);
+  lldb::TypeSP CreateAndCacheType(PdbTypeSymId type_id, CompileUnit &comp_unit);
   lldb::VariableSP CreateGlobalVariable(PdbGlobalSymId var_id);
   lldb::VariableSP CreateConstantSymbol(PdbGlobalSymId var_id,
                                         const llvm::codeview::CVSymbol &cvs);
@@ -278,6 +316,10 @@ private:
   llvm::DenseMap<lldb::user_id_t, std::shared_ptr<InlineSite>> m_inline_sites;
   llvm::DenseMap<llvm::codeview::TypeIndex, llvm::codeview::TypeIndex>
       m_parent_types;
+
+  llvm::DenseMap<lldb::user_id_t, lldb::LanguageType> m_id_to_language;
+  llvm::DenseMap<ConstString, lldb::TypeSP> m_name_to_type;
+  llvm::DenseSet<lldb::user_id_t> m_parsing_started;
 };
 
 } // namespace npdb

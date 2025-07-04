@@ -81,9 +81,14 @@ bool RustLanguage::SymbolNameFitsToLanguage(Mangled name) const {
 bool RustLanguage::IsTopLevelFunction(Function& function) {
   auto ctx = function.GetDeclContext();
 
-  auto* rc = static_cast<RustDeclContext*>(ctx.GetOpaqueDeclContext());
+  auto* rc = static_cast<RustDecl*>(ctx.GetOpaqueDeclContext());
 
-  return rc->kind != RustDeclContext::Struct;
+  if (rc) {
+    return rc->variant.index() != RustDecl::Type;
+  }
+
+  // usually always true
+  return true;
 }
 
 std::unique_ptr<Language::TypeScavenger> RustLanguage::GetTypeScavenger() {

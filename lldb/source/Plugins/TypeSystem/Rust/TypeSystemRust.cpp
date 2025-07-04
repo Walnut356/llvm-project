@@ -16,53 +16,81 @@
 #include "Plugins/SymbolFile/DWARF/DWARFUnit.h"
 #include "Plugins/SymbolFile/DWARF/SymbolFileDWARF.h"
 #include "Plugins/SymbolFile/DWARF/UniqueDWARFASTType.h"
+#include "Plugins/SymbolFile/NativePDB/PdbSymUid.h"
+#include "Plugins/SymbolFile/NativePDB/PdbUtil.h"
+#include "Plugins/SymbolFile/NativePDB/SymbolFileNativePDB.h"
 #include "lldb/Core/PluginManager.h"
 #include "lldb/Core/ValueObject.h"
 #include "lldb/Core/dwarf.h"
 #include "lldb/Expression/DWARFExpression.h"
 #include "lldb/Symbol/CompileUnit.h"
 #include "lldb/Symbol/CompilerType.h"
+#include "lldb/Symbol/Type.h"
+#include "lldb/Utility/FileSpec.h"
 #include "lldb/Utility/StreamString.h"
 #include "lldb/lldb-enumerations.h"
 #include "lldb/lldb-private-enumerations.h"
+#include "lldb/lldb-types.h"
+#include "llvm/ADT/APInt.h"
+#include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/bit.h"
 #include "llvm/BinaryFormat/Dwarf.h"
-#include "llvm/DebugInfo/PDB/IPDBLineNumber.h"
-#include "llvm/DebugInfo/PDB/IPDBSession.h"
-#include "llvm/DebugInfo/PDB/IPDBSourceFile.h"
+// #include "llvm/DebugInfo/PDB/IPDBEnumChildren.h"
+// #include "llvm/DebugInfo/PDB/IPDBLineNumber.h"
+// #include "llvm/DebugInfo/PDB/IPDBSession.h"
+// #include "llvm/DebugInfo/PDB/IPDBSourceFile.h"
+#include "llvm/DebugInfo/CodeView/CodeView.h"
+#include "llvm/DebugInfo/CodeView/RecordName.h"
+#include "llvm/DebugInfo/CodeView/SymbolDeserializer.h"
+#include "llvm/DebugInfo/CodeView/SymbolRecord.h"
+#include "llvm/DebugInfo/CodeView/SymbolRecordHelpers.h"
+#include "llvm/DebugInfo/CodeView/TypeDeserializer.h"
+#include "llvm/DebugInfo/CodeView/TypeRecord.h"
+#include "llvm/DebugInfo/PDB/Native/DbiStream.h"
+#include "llvm/DebugInfo/PDB/Native/GlobalsStream.h"
+#include "llvm/DebugInfo/PDB/Native/PDBStringTable.h"
+#include "llvm/DebugInfo/PDB/Native/SymbolStream.h"
+#include "llvm/DebugInfo/PDB/Native/TpiStream.h"
 #include "llvm/DebugInfo/PDB/PDBSymbol.h"
-#include "llvm/DebugInfo/PDB/PDBSymbolFunc.h"
-#include "llvm/DebugInfo/PDB/PDBSymbolTypeArray.h"
-#include "llvm/DebugInfo/PDB/PDBSymbolTypeBaseClass.h"
-#include "llvm/DebugInfo/PDB/PDBSymbolTypeBuiltin.h"
-#include "llvm/DebugInfo/PDB/PDBSymbolTypeEnum.h"
-#include "llvm/DebugInfo/PDB/PDBSymbolTypeFunctionArg.h"
-#include "llvm/DebugInfo/PDB/PDBSymbolTypeFunctionSig.h"
-#include "llvm/DebugInfo/PDB/PDBSymbolTypePointer.h"
-#include "llvm/DebugInfo/PDB/PDBSymbolTypeTypedef.h"
-#include "llvm/DebugInfo/PDB/PDBSymbolTypeUDT.h"
-#include "llvm/DebugInfo/PDB/PDBTypes.h"
-#include "llvm/Support/Format.h"
+
+// #include "llvm/DebugInfo/PDB/PDBSymbolFunc.h"
+// #include "llvm/DebugInfo/PDB/PDBSymbolTypeArray.h"
+// #include "llvm/DebugInfo/PDB/PDBSymbolTypeBaseClass.h"
+// #include "llvm/DebugInfo/PDB/PDBSymbolTypeBuiltin.h"
+// #include "llvm/DebugInfo/PDB/PDBSymbolTypeEnum.h"
+// #include "llvm/DebugInfo/PDB/PDBSymbolTypeFunctionArg.h"
+// #include "llvm/DebugInfo/PDB/PDBSymbolTypeFunctionSig.h"
+// #include "llvm/DebugInfo/PDB/PDBSymbolTypePointer.h"
+// #include "llvm/DebugInfo/PDB/PDBSymbolTypeTypedef.h"
+// #include "llvm/DebugInfo/PDB/PDBSymbolTypeUDT.h"
+// #include "llvm/DebugInfo/PDB/PDBTypes.h"
+// #include "llvm/Support/Format.h"
+#include "llvm/Support/BinaryStreamReader.h"
+#include "llvm/Support/Error.h"
 #include "llvm/Support/FormatVariadic.h"
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <memory>
 #include <optional>
 #include <string>
 
+using namespace llvm::codeview;
 using namespace llvm::dwarf;
 using namespace llvm::pdb;
 using namespace lldb;
 using namespace lldb_private::plugin::dwarf;
+using namespace lldb_private::npdb;
 
 LLDB_PLUGIN_DEFINE(TypeSystemRust)
 
 namespace lldb_private {
 // TODO maybe these don't work?
 
-void RustDeclContext::AddItem(std::shared_ptr<RustDeclBase>&& item) {
-  ConstString name = item->Name();
-  child_decls[name] = std::move(item);
-}
+// void RustDeclContext::AddItem(std::shared_ptr<RustDeclBase>&& item) {
+//   ConstString name = item->Name();
+//   child_decls[name] = std::move(item);
+// }
 
 /// Returns a pair containing the root name of the type, and the template args
 /// of that type.
@@ -73,7 +101,7 @@ void RustDeclContext::AddItem(std::shared_ptr<RustDeclBase>&& item) {
 ///
 /// Useful for PDB debug info, which does not store template args in any
 /// convenient way.
-std::pair<llvm::StringRef, std::vector<llvm::StringRef>>
+static std::pair<llvm::StringRef, std::vector<llvm::StringRef>>
 GetTemplateArgs(llvm::StringRef name) {
 
   auto [root_name, args] = name.split('<');
@@ -82,8 +110,14 @@ GetTemplateArgs(llvm::StringRef name) {
     return {root_name, {}};
   }
 
-  assert(args.ends_with('>'));
-  args = args.substr(0, args.size() - 1);
+  // this can happen for msvc sum-types (e.g. enum2$<sample::Number>::NAMES)
+  if (!args.ends_with('>')) {
+    return {name, {}};
+  }
+
+  args.consume_back(">");
+  args = args.trim();
+  // args = args.substr(0, args.size() - 1);
 
   std::vector<llvm::StringRef> arg_vec{};
   uint32_t len = args.size();
@@ -96,111 +130,120 @@ GetTemplateArgs(llvm::StringRef name) {
     }
   }
 
+  // we already cut off the trailing `>` above, so now we need to handle the
+  // case where there wasn't a trailing `,`
+  auto last = args.substr(start).trim();
+  if (last.size() != 0) {
+    arg_vec.push_back(last);
+  }
+
   return {root_name, arg_vec};
 }
 
 /// Fixes type name output of MSVC-specific entities (e.g. `tuple$<u8, u16>` ->
-/// `(u8, u16)`, `ref$<slice2$<i32>>` -> `&[i32]`). This transformation is done
+/// `(u8, u16)`, `ref$<slice2$<i32> >` -> `&[i32]`). This transformation is done
 /// recursively, so all generics within the type name will also be normalized.
 ///
 /// The names that need to be normalized can be found in the rust repo under
 /// `compiler/rust_codegen_ssa/src/debuginfo/type_names.rs`
-ConstString NormalizeMsvcTypeName(llvm::StringRef type_name) {
-  const std::array<ConstString, 14> NAMES = {
-      ConstString("str$"),
-      ConstString("never$"),
-      ConstString("tuple$"),
-      ConstString("ptr_const$"),
-      ConstString("ptr_mut$"),
-      ConstString("ref$"),
-      ConstString("ref_mut$"),
-      ConstString("array$"),
-      ConstString("pat$"),
-      ConstString("slice2$"),
-      ConstString("dyn$"),
-      ConstString("assoc$"),
-      ConstString("recursive_type$"),
-      ConstString("enum2$")
-      // also "return_type (*)()" for functions, but that needs unique handling
-  };
+// ConstString NormalizeMsvcTypeName(llvm::StringRef type_name) {
+//   const std::array<ConstString, 14> NAMES = {
+//       ConstString("str$"),
+//       ConstString("never$"),
+//       ConstString("tuple$"),
+//       ConstString("ptr_const$"),
+//       ConstString("ptr_mut$"),
+//       ConstString("ref$"),
+//       ConstString("ref_mut$"),
+//       ConstString("array$"),
+//       ConstString("pat$"),
+//       ConstString("slice2$"),
+//       ConstString("dyn$"),
+//       ConstString("assoc$"),
+//       ConstString("recursive_type$"),
+//       ConstString("enum2$")
+//       // also "return_type (*)()" for functions, but that needs unique
+//       handling
+//   };
 
-  auto [root, args] = GetTemplateArgs(type_name);
+//   auto [root, args] = GetTemplateArgs(type_name);
 
-  std::string arg_string = {};
+//   std::string arg_string = {};
 
-  for (auto arg : args) {
-    arg_string.append(NormalizeMsvcTypeName(arg).AsCString());
-    arg_string.push_back(',');
-  }
+//   for (auto arg : args) {
+//     arg_string.append(NormalizeMsvcTypeName(arg).AsCString());
+//     arg_string.push_back(',');
+//   }
 
-  // remove the potential trailing comma
-  if (args.size() != 0) {
-    arg_string.pop_back();
-  }
+//   // remove the potential trailing comma
+//   if (args.size() != 0) {
+//     arg_string.pop_back();
+//   }
 
-  for (int i = 0; i < 14; ++i) {
-    if (NAMES[i] == root) {
-      switch (i) {
-      case 0: { // str$
-        return ConstString(root.substr(0, root.size() - 1));
-      }
-      case 1: { // never$
-        return ConstString("!");
-      }
-      case 2: { // tuple$
-        return ConstString(llvm::formatv("({0})", arg_string).str());
-      }
-      case 3: { // ptr_const$
-        return ConstString(llvm::formatv("*const {0}", arg_string).str());
-      }
-      case 4: { // ptr_mut$
-        return ConstString(llvm::formatv("*mut {0}", arg_string).str());
-      }
-      case 5: { // ref$
-        return ConstString(llvm::formatv("&{0}", arg_string).str());
-      }
-      case 6: { // ref_mut$
-        return ConstString(llvm::formatv("&mut {0}", arg_string).str());
-      }
-      case 7: { // array$
-        // this should never fail since arrays will always have at 2 top-level
-        // generics, the second of which must be a number (thus contains no
-        // comma).
-        auto last_comma = arg_string.rfind(',');
-        arg_string[last_comma] = ';';
+//   for (int i = 0; i < 14; ++i) {
+//     if (NAMES[i] == root) {
+//       switch (i) {
+//       case 0: { // str$
+//         return ConstString(root.substr(0, root.size() - 1));
+//       }
+//       case 1: { // never$
+//         return ConstString("!");
+//       }
+//       case 2: { // tuple$
+//         return ConstString(llvm::formatv("({0})", arg_string).str());
+//       }
+//       case 3: { // ptr_const$
+//         return ConstString(llvm::formatv("*const {0}", arg_string).str());
+//       }
+//       case 4: { // ptr_mut$
+//         return ConstString(llvm::formatv("*mut {0}", arg_string).str());
+//       }
+//       case 5: { // ref$
+//         return ConstString(llvm::formatv("&{0}", arg_string).str());
+//       }
+//       case 6: { // ref_mut$
+//         return ConstString(llvm::formatv("&mut {0}", arg_string).str());
+//       }
+//       case 7: { // array$
+//         // this should never fail since arrays will always have at 2
+//         top-level
+//         // generics, the second of which must be a number (thus contains no
+//         // comma).
+//         auto last_comma = arg_string.rfind(',');
+//         arg_string[last_comma] = ';';
 
-        return ConstString(llvm::formatv("[{0}]", arg_string).str());
-      }
-      case 8: { // pat$ TODO
-        return ConstString(type_name);
-      }
-      case 9: { // slice2$
-        // similar to array formatting but has no length value. They're
-        // typically wrapped in a `ref$` or `ref_mut$`, which the recursion
-        // should handle
-        return ConstString(llvm::formatv("[{0}]", arg_string).str());
-      }
-      case 10:   // dyn$ TODO
-      case 11:   // assoc$ TODO
-      case 12: { // recursive_type$ TODO
-        return ConstString(type_name);
-      }
-      case 13: { // enum2$
-        return ConstString(arg_string);
-      }
-      default:
-        // unreachable
-        assert(0);
-      }
-    }
-  }
+//         return ConstString(llvm::formatv("[{0}]", arg_string).str());
+//       }
+//       case 8: { // pat$ TODO
+//         return ConstString(type_name);
+//       }
+//       case 9: { // slice2$
+//         // similar to array formatting but has no length value. They're
+//         // typically wrapped in a `ref$` or `ref_mut$`, which the recursion
+//         // should handle
+//         return ConstString(llvm::formatv("[{0}]", arg_string).str());
+//       }
+//       case 10:   // dyn$ TODO
+//       case 11:   // assoc$ TODO
+//       case 12: { // recursive_type$ TODO
+//         return ConstString(type_name);
+//       }
+//       case 13: { // enum2$
+//         return ConstString(arg_string);
+//       }
+//       default:
+//         // unreachable
+//         assert(0);
+//       }
+//     }
+//   }
 
-  if (args.size() == 0) {
-    return ConstString(type_name);
-  }
+//   if (args.size() == 0) {
+//     return ConstString(type_name);
+//   }
 
-  return ConstString(llvm::formatv("{0}<{1}>", root, arg_string).str());
-}
+//   return ConstString(llvm::formatv("{0}<{1}>", root, arg_string).str());
+// }
 
 // -------------------------------------------------------------------------- //
 //                                 Bookkeeping                                //
@@ -412,13 +455,11 @@ TypeSP TypeSystemRust::ParseBasicType(const DWARFDIE& die) {
   RustType* rt;
 
   if (byte_size == 0 && type_name && type_name == UNIT_TYPE_NAME) {
-    rt = new RustType{
-        RustType::NewAggregate(type_name, 0, 1, AggregateKind::Tuple)
-    };
+    rt = primitive_types.unit();
   } else {
     switch (static_cast<TypeKind>(encoding)) {
     case DW_ATE_boolean:
-      rt = new RustType{RustType::NewBool(type_name)};
+      rt = primitive_types.Bool();
       break;
     case DW_ATE_float:
       switch (byte_size) {
@@ -435,6 +476,7 @@ TypeSP TypeSystemRust::ParseBasicType(const DWARFDIE& die) {
         rt = primitive_types.f128();
         break;
       default:
+        // TODO leak
         rt = new RustType{RustType::NewFloat(type_name, byte_size)};
       }
       break;
@@ -442,6 +484,7 @@ TypeSP TypeSystemRust::ParseBasicType(const DWARFDIE& die) {
       if (type_name == ISIZE_NAME) {
         rt = primitive_types.isize();
         rt->m_size = byte_size;
+        m_pointer_byte_size = byte_size;
         break;
       }
       switch (byte_size) {
@@ -461,6 +504,7 @@ TypeSP TypeSystemRust::ParseBasicType(const DWARFDIE& die) {
         rt = primitive_types.i128();
         break;
       default:
+        // TODO leak
         rt = new RustType{RustType::NewInt(type_name, byte_size)};
       }
       break;
@@ -469,6 +513,7 @@ TypeSP TypeSystemRust::ParseBasicType(const DWARFDIE& die) {
       if (type_name == USIZE_NAME) {
         rt = primitive_types.usize();
         rt->m_size = byte_size;
+        m_pointer_byte_size = byte_size;
         break;
       }
       auto rust_type = RustType{RustType::NewUInt(type_name, byte_size)};
@@ -489,15 +534,17 @@ TypeSP TypeSystemRust::ParseBasicType(const DWARFDIE& die) {
         rt = primitive_types.u128();
         break;
       default:
+        // TODO leak
         rt = new RustType{RustType::NewUInt(type_name, byte_size)};
       }
     } break;
     case DW_ATE_UTF:
-      rt = new RustType{RustType::NewChar(type_name)};
+      rt = primitive_types.Char();
       break;
     default:
       // nothing else should make it here
       assert(0);
+      rt = nullptr;
     }
   }
 
@@ -666,7 +713,7 @@ TypeSP TypeSystemRust::ParseCStyleEnum(const DWARFDIE& die) {
         child.GetAttributes(DWARFBaseDIE::Recurse::yes);
     size_t child_size = child_attrs.Size();
 
-    std::string name = "";
+    ConstString name;
     uint64_t value;
     bool saw_value = false;
 
@@ -678,7 +725,7 @@ TypeSP TypeSystemRust::ParseCStyleEnum(const DWARFDIE& die) {
       }
       switch (tag) {
       case DW_AT_name:
-        name = form_value.AsCString();
+        name = ConstString(form_value.AsCString());
         break;
       case DW_AT_const_value:
         value = form_value.Unsigned();
@@ -689,7 +736,7 @@ TypeSP TypeSystemRust::ParseCStyleEnum(const DWARFDIE& die) {
       }
     }
 
-    if (saw_value && !name.empty()) {
+    if (saw_value && !name.IsEmpty()) {
       renum->variants[value] = name;
     }
   }
@@ -869,11 +916,13 @@ TypeSP TypeSystemRust::ParseStructureType(const DWARFDIE& die) {
   return type_sp;
 }
 
-FieldAttributes TypeSystemRust::ParseFieldAttributes(const DWARFDIE& die) {
+std::pair<FieldAttributes, plugin::dwarf::DWARFFormValue>
+TypeSystemRust::ParseFieldAttributes(const DWARFDIE& die) {
   DWARFAttributes attrs = die.GetAttributes(DWARFBaseDIE::Recurse::yes);
   size_t size = attrs.Size();
 
   FieldAttributes field;
+  DWARFFormValue encoding;
 
   ModuleSP module_sp = die.GetModule();
 
@@ -888,7 +937,7 @@ FieldAttributes TypeSystemRust::ParseFieldAttributes(const DWARFDIE& die) {
       field.name.SetCString(form_value.AsCString());
       break;
     case DW_AT_type:
-      attrs.ExtractFormValueAtIndex(i, field.encoding);
+      attrs.ExtractFormValueAtIndex(i, encoding);
       break;
     case DW_AT_alignment:
       field.byte_align = form_value.Unsigned();
@@ -933,13 +982,14 @@ FieldAttributes TypeSystemRust::ParseFieldAttributes(const DWARFDIE& die) {
     }
   }
 
-  return field;
+  return std::make_pair(field, encoding);
 }
 
 void TypeSystemRust::ParseStructFields(
     const DWARFDIE& die,
     std::vector<FieldAttributes>& fields,
-    std::vector<CompilerType>& template_args,
+    std::vector<std::pair<llvm::StringRef, std::optional<CompilerType>>>&
+        template_args,
     bool is_tuple
 ) {
   for (auto& child : die.children()) {
@@ -950,10 +1000,13 @@ void TypeSystemRust::ParseStructFields(
       auto encoding_ref = child.GetAttributeValueAsReferenceDIE(DW_AT_type);
       Type* templ = child.ResolveTypeUID(encoding_ref);
 
-      template_args.push_back(templ->GetLayoutCompilerType());
+      template_args.push_back(std::make_pair(
+          templ->GetName().GetStringRef(),
+          templ->GetLayoutCompilerType()
+      ));
 
     } else if (tag == DW_TAG_member) {
-      auto field = ParseFieldAttributes(child);
+      auto [field, encoding] = ParseFieldAttributes(child);
 
       auto f_name = field.name.GetStringRef();
 
@@ -970,7 +1023,7 @@ void TypeSystemRust::ParseStructFields(
       }
 
       Type* member_type =
-          child.GetDWARF()->ResolveTypeUID(field.encoding.Reference().GetID());
+          child.GetDWARF()->ResolveTypeUID(encoding.Reference().GetID());
       if (member_type) {
         field.underlying_type = member_type->GetFullCompilerType();
       }
@@ -1001,7 +1054,7 @@ CompilerType TypeSystemRust::ParseSumType(
   //         DW_TAG_structure_type   (type of variant 2)
   //         DW_TAG_structure_type   (type of variant 3)
   //
-  // That means this outter look must handle the `variant_part` and
+  // That means this outter loop must handle the `variant_part` and
   // `structure_type` tags from a "macro" level
   //
   // Importantly, even if one of the enum members is carrying no extra data,
@@ -1010,6 +1063,7 @@ CompilerType TypeSystemRust::ParseSumType(
   // If the enum has a generic arg, it is not output for the top level
   // DW_TAG_structure_type, but *is* output for each of the variant types.
 
+  //
   std::pair<CompilerType, std::vector<std::optional<uint64_t>>> discr_info;
   std::vector<EnumVariant> variant_types{};
 
@@ -1032,6 +1086,8 @@ CompilerType TypeSystemRust::ParseSumType(
           ParseStructureType(child)->GetFullCompilerType();
 
       // matches the expected naming format for current rust SyntheticProviders
+
+      // TODO does not match PDB output
       ConstString name =
           ConstString(llvm::formatv("$variant{0}$", variant_idx).str());
 
@@ -1061,7 +1117,7 @@ CompilerType TypeSystemRust::ParseSumType(
     auto& discr_value = discr_info.second[i];
 
     if (discr_value.has_value()) {
-      sum_type->discr_map[discr_value.value()] = i;
+      sum_type->discr_map[{discr_value.value(), 0}] = i;
     } else {
       sum_type->untagged_variant = std::make_optional(i);
     }
@@ -1273,17 +1329,21 @@ TypeSP TypeSystemRust::ParseFunctionType(const DWARFDIE& die) {
 
   // Create a FunctionDecl to be used later elsewhere
 
-  auto* containing_decl_ctx = static_cast<RustDeclContext*>(
+  auto* containing_decl_ctx = static_cast<RustDecl*>(
       GetDeclContextForUIDFromDWARF(die).GetOpaqueDeclContext()
   );
 
   if (!containing_decl_ctx) {
     containing_decl_ctx = m_compile_unit_ctx.get();
   }
-  auto* func_decl = new RustDeclBase{
-      RustDecl{type_name, mangled, containing_decl_ctx, compiler_type}
+  auto* func_decl = new RustDecl{
+      type_name,
+      mangled,
+      containing_decl_ctx,
+      FnDecl{llvm::DenseMap<ConstString, RustDecl*>(), compiler_type}
   };
-  containing_decl_ctx->AddItem(std::unique_ptr<RustDeclBase>(func_decl));
+
+  containing_decl_ctx->AddItem(func_decl);
 
   return dwarf->MakeType(
       die.GetID(),
@@ -1401,16 +1461,15 @@ CompilerDecl TypeSystemRust::GetDecl(
   if (!ast)
     return CompilerDecl();
 
-  RustDeclContext* dc = (RustDeclContext*)parent.GetOpaqueDeclContext();
-  RustDeclBase* base = dc->FindByName(name);
+  RustDecl* dc = (RustDecl*)parent.GetOpaqueDeclContext();
+  RustDecl* base = dc->FindByName(name);
   if (base) {
-    if (RustDecl* ctx = base->AsDecl()) {
-      return CompilerDecl(this, ctx);
-    }
+    return CompilerDecl(this, base);
   }
 
-  auto* new_ns = new RustDeclBase{RustDecl(name, mangled, dc, CompilerType())};
-  dc->AddItem(std::unique_ptr<RustDeclBase>(new_ns));
+  // TODO leak
+  auto* new_ns = new RustDecl{name, mangled, dc, UnknownDecl{}};
+  dc->AddItem(new_ns);
 
   return CompilerDecl(this, new_ns);
 }
@@ -1422,6 +1481,128 @@ TypeSystemRust::GetDeclForUIDFromDWARF(const plugin::dwarf::DWARFDIE& die) {
   }
 
   CompilerDecl result;
+  switch (die.Tag()) {
+
+  case DW_TAG_null:
+  case DW_TAG_array_type:
+  case DW_TAG_class_type:
+  case DW_TAG_entry_point:
+  case DW_TAG_enumeration_type:
+  case DW_TAG_formal_parameter:
+  case DW_TAG_imported_declaration:
+  case DW_TAG_label:
+  case DW_TAG_lexical_block:
+  case DW_TAG_member:
+  case DW_TAG_pointer_type:
+  case DW_TAG_reference_type:
+  case DW_TAG_compile_unit:
+  case DW_TAG_string_type:
+  case DW_TAG_structure_type:
+  case DW_TAG_subroutine_type:
+  case DW_TAG_typedef:
+  case DW_TAG_union_type:
+  case DW_TAG_unspecified_parameters:
+  case DW_TAG_variant:
+  case DW_TAG_common_block:
+  case DW_TAG_common_inclusion:
+  case DW_TAG_inheritance:
+  case DW_TAG_inlined_subroutine:
+  case DW_TAG_module:
+  case DW_TAG_ptr_to_member_type:
+  case DW_TAG_set_type:
+  case DW_TAG_subrange_type:
+  case DW_TAG_with_stmt:
+  case DW_TAG_access_declaration:
+  case DW_TAG_base_type:
+  case DW_TAG_catch_block:
+  case DW_TAG_const_type:
+  case DW_TAG_constant:
+  case DW_TAG_enumerator:
+  case DW_TAG_file_type:
+  case DW_TAG_friend:
+  case DW_TAG_namelist:
+  case DW_TAG_namelist_item:
+  case DW_TAG_packed_type:
+  case DW_TAG_subprogram:
+  case DW_TAG_template_type_parameter:
+  case DW_TAG_template_value_parameter:
+  case DW_TAG_thrown_type:
+  case DW_TAG_try_block:
+  case DW_TAG_variant_part:
+  case DW_TAG_variable:
+  case DW_TAG_volatile_type:
+  case DW_TAG_dwarf_procedure:
+  case DW_TAG_restrict_type:
+  case DW_TAG_interface_type:
+  case DW_TAG_namespace:
+  case DW_TAG_imported_module:
+  case DW_TAG_unspecified_type:
+  case DW_TAG_partial_unit:
+  case DW_TAG_imported_unit:
+  case DW_TAG_condition:
+  case DW_TAG_shared_type:
+  case DW_TAG_type_unit:
+  case DW_TAG_rvalue_reference_type:
+  case DW_TAG_template_alias:
+  case DW_TAG_coarray_type:
+  case DW_TAG_generic_subrange:
+  case DW_TAG_dynamic_type:
+  case DW_TAG_atomic_type:
+  case DW_TAG_call_site:
+  case DW_TAG_call_site_parameter:
+  case DW_TAG_skeleton_unit:
+  case DW_TAG_immutable_type:
+  case DW_TAG_MIPS_loop:
+  case DW_TAG_format_label:
+  case DW_TAG_function_template:
+  case DW_TAG_class_template:
+  case DW_TAG_GNU_BINCL:
+  case DW_TAG_GNU_EINCL:
+  case DW_TAG_GNU_template_template_param:
+  case DW_TAG_GNU_template_parameter_pack:
+  case DW_TAG_GNU_formal_parameter_pack:
+  case DW_TAG_GNU_call_site:
+  case DW_TAG_GNU_call_site_parameter:
+  case DW_TAG_APPLE_property:
+  case DW_TAG_SUN_function_template:
+  case DW_TAG_SUN_class_template:
+  case DW_TAG_SUN_struct_template:
+  case DW_TAG_SUN_union_template:
+  case DW_TAG_SUN_indirect_inheritance:
+  case DW_TAG_SUN_codeflags:
+  case DW_TAG_SUN_memop_info:
+  case DW_TAG_SUN_omp_child_func:
+  case DW_TAG_SUN_rtti_descriptor:
+  case DW_TAG_SUN_dtor_info:
+  case DW_TAG_SUN_dtor:
+  case DW_TAG_SUN_f90_interface:
+  case DW_TAG_SUN_fortran_vax_structure:
+  case DW_TAG_SUN_hi:
+  case DW_TAG_LLVM_ptrauth_type:
+  case DW_TAG_ALTIUM_circ_type:
+  case DW_TAG_ALTIUM_mwa_circ_type:
+  case DW_TAG_ALTIUM_rev_carry_type:
+  case DW_TAG_ALTIUM_rom:
+  case DW_TAG_LLVM_annotation:
+  case DW_TAG_GHS_namespace:
+  case DW_TAG_GHS_using_namespace:
+  case DW_TAG_GHS_using_declaration:
+  case DW_TAG_GHS_template_templ_param:
+  case DW_TAG_UPC_shared_type:
+  case DW_TAG_UPC_strict_type:
+  case DW_TAG_UPC_relaxed:
+  case DW_TAG_PGI_kanji_type:
+  case DW_TAG_PGI_interface_block:
+  case DW_TAG_BORLAND_property:
+  case DW_TAG_BORLAND_Delphi_string:
+  case DW_TAG_BORLAND_Delphi_dynamic_array:
+  case DW_TAG_BORLAND_Delphi_set:
+  case DW_TAG_BORLAND_Delphi_variant:
+  case DW_TAG_lo_user:
+  case DW_TAG_hi_user:
+  case DW_TAG_user_base:
+    break;
+  }
   if (die.Tag() == DW_TAG_variable || die.Tag() == DW_TAG_constant) {
     const char* name = die.GetName();
     if (name) {
@@ -1445,18 +1626,19 @@ TypeSystemRust::GetDeclContextForUIDFromDWARF(const plugin::dwarf::DWARFDIE& die
     return m_decl_contexts[die.GetDIE()];
   }
 
-  auto declkind = RustDeclContext::Namespace;
+  auto declkind = RustDecl::Namespace;
 
   CompilerDeclContext result;
   switch (die.Tag()) {
   case DW_TAG_compile_unit:
     if (!m_compile_unit_ctx) {
-      m_compile_unit_ctx.reset(new RustDeclContext{
-          llvm::DenseMap<ConstString, std::shared_ptr<RustDeclBase>>(),
+      m_compile_unit_ctx.reset(new RustDecl{
           ConstString(""),
           ConstString(),
           nullptr,
-          RustDeclContext::CompileUnit
+          CompUnitDecl{
+              llvm::DenseMap<ConstString, RustDecl*>{},
+          }
       });
     }
 
@@ -1464,7 +1646,7 @@ TypeSystemRust::GetDeclContextForUIDFromDWARF(const plugin::dwarf::DWARFDIE& die
     break;
   case DW_TAG_union_type:
   case DW_TAG_structure_type:
-    declkind = RustDeclContext::Struct;
+    declkind = RustDecl::Type;
     [[clang::fallthrough]];
   case DW_TAG_namespace: {
     auto name = ConstString(die.GetName());
@@ -1479,30 +1661,32 @@ TypeSystemRust::GetDeclContextForUIDFromDWARF(const plugin::dwarf::DWARFDIE& die
       break;
     }
 
-    auto* dc = static_cast<RustDeclContext*>(parent.GetOpaqueDeclContext());
+    auto* dc = static_cast<RustDecl*>(parent.GetOpaqueDeclContext());
 
-    if (dc && dc->child_decls.contains(name)) {
-      auto* decl = dc->child_decls[name].get();
-      if (RustDeclContext* ctx = decl->AsDeclContext()) {
-        result = CompilerDeclContext(this, ctx);
+    if (dc) {
+      if (auto* children = dc->GetChildren()) {
+        if (children->contains(name)) {
+          result = CompilerDeclContext(this, (*children)[name]);
+        }
       }
     }
 
     // auto new_ctx = RustDeclContext(name, dc, declkind);
 
-    auto* new_ns = new RustDeclBase{RustDeclContext{
-        llvm::DenseMap<ConstString, std::shared_ptr<RustDeclBase>>(),
-        name,
-        ConstString(),
-        dc,
-        declkind
-    }};
+    RustDecl::DeclInner variant =
+        declkind == RustDecl::Type
+            ? RustDecl::DeclInner{TypeDecl{CompilerType()}}
+            : RustDecl::DeclInner{
+                  NamespaceDecl{llvm::DenseMap<ConstString, RustDecl*>()}
+              };
 
-    dc->AddItem(std::shared_ptr<RustDeclBase>(new_ns));
+    auto* new_ns = new RustDecl{name, ConstString(), dc, std::move(variant)};
+    dc->AddItem(new_ns);
     result = CompilerDeclContext(this, new_ns);
-
   } break;
   case DW_TAG_lexical_block:
+    declkind = RustDecl::Block;
+    [[clang::fallthrough]];
   case DW_TAG_subprogram: {
     auto parent = GetDeclContextContainingUIDFromDWARF(die);
 
@@ -1520,7 +1704,7 @@ TypeSystemRust::GetDeclContextForUIDFromDWARF(const plugin::dwarf::DWARFDIE& die
     std::optional<int> call_line;
     std::optional<int> call_column;
 
-    // TODO
+    // TODO check if we can get type information?
     auto data = die.GetDIENamesAndRanges(
         c_name,
         mangled,
@@ -1534,7 +1718,7 @@ TypeSystemRust::GetDeclContextForUIDFromDWARF(const plugin::dwarf::DWARFDIE& die
         nullptr
     );
 
-    auto* dc = static_cast<RustDeclContext*>(parent.GetOpaqueDeclContext());
+    auto* dc = static_cast<RustDecl*>(parent.GetOpaqueDeclContext());
 
     // we should be able to uniquely identify lexical blocks by their address
     // range
@@ -1543,22 +1727,26 @@ TypeSystemRust::GetDeclContextForUIDFromDWARF(const plugin::dwarf::DWARFDIE& die
 
     auto name =
         ConstString(llvm::formatv("{0}..{1}", range_begin, range_end).str());
-    if (dc && dc->child_decls.contains(name)) {
-      auto* decl = dc->child_decls[name].get();
-      if (RustDeclContext* ctx = decl->AsDeclContext()) {
-        result = CompilerDeclContext(this, ctx);
+    if (dc) {
+      if (auto* children = dc->GetChildren()) {
+        if (children->contains(name)) {
+          auto* decl = (*children)[name];
+          if (decl->IsContext()) {
+            result = CompilerDeclContext(this, decl);
+          }
+        }
       }
     }
 
-    auto* new_ns = new RustDeclBase{RustDeclContext{
-        llvm::DenseMap<ConstString, std::shared_ptr<RustDeclBase>>(),
+    // TODO leak
+    auto* new_ns = new RustDecl{
         name,
         ConstString(),
         dc,
-        declkind
-    }};
+        FnDecl{llvm::DenseMap<ConstString, RustDecl*>(), CompilerType()}
+    };
 
-    dc->AddItem(std::shared_ptr<RustDeclBase>(new_ns));
+    dc->AddItem(new_ns);
     result = CompilerDeclContext(this, new_ns);
   }
     result = GetDeclContextContainingUIDFromDWARF(die);
@@ -1611,7 +1799,7 @@ TypeSystemRust::DeclGetFunctionArgumentType(void* opaque_decl, size_t arg_idx) {
     return CompilerType();
   }
 
-  auto* rd = static_cast<RustDeclBase*>(opaque_decl)->AsDecl();
+  auto* rd = static_cast<RustDecl*>(opaque_decl)->AsFn();
 
   if (!rd) {
     return CompilerType();
@@ -1628,8 +1816,7 @@ ConstString TypeSystemRust::DeclGetName(void* opaque_decl) {
   if (!opaque_decl) {
     return ConstString();
   }
-  RustDeclBase* dc = static_cast<RustDeclBase*>(opaque_decl);
-  return dc->Name();
+  return static_cast<RustDecl*>(opaque_decl)->name;
 }
 
 ConstString TypeSystemRust::DeclGetMangledName(void* opaque_decl) {
@@ -1637,16 +1824,15 @@ ConstString TypeSystemRust::DeclGetMangledName(void* opaque_decl) {
     return ConstString();
   }
 
-  RustDeclBase* dc = static_cast<RustDeclBase*>(opaque_decl);
-  return dc->AsDecl()->mangled;
+  return static_cast<RustDecl*>(opaque_decl)->mangled;
 }
 
 CompilerDeclContext TypeSystemRust::DeclGetDeclContext(void* opaque_decl) {
   if (!opaque_decl) {
     return CompilerDeclContext();
   }
-  RustDeclBase* dc = static_cast<RustDeclBase*>(opaque_decl);
-  return CompilerDeclContext(this, dc->Context());
+  RustDecl* dc = static_cast<RustDecl*>(opaque_decl);
+  return CompilerDeclContext(this, dc->parent);
 }
 
 CompilerType TypeSystemRust::DeclGetFunctionReturnType(void* opaque_decl) {
@@ -1654,7 +1840,7 @@ CompilerType TypeSystemRust::DeclGetFunctionReturnType(void* opaque_decl) {
     return CompilerType();
   }
 
-  auto* rd = static_cast<RustDeclBase*>(opaque_decl)->AsDecl();
+  auto* rd = static_cast<RustDecl*>(opaque_decl)->AsFn();
 
   if (!rd) {
     return CompilerType();
@@ -1672,7 +1858,7 @@ size_t TypeSystemRust::DeclGetFunctionNumArguments(void* opaque_decl) {
     return 0;
   }
 
-  auto* rd = static_cast<RustDeclBase*>(opaque_decl)->AsDecl();
+  auto* rd = static_cast<RustDecl*>(opaque_decl)->AsFn();
 
   if (!rd) {
     return 0;
@@ -1707,8 +1893,17 @@ TypeSystemRust::DeclGetCompilerContext(void* opaque_decl) {
 }
 
 Scalar TypeSystemRust::DeclGetConstantValue(void* opaque_decl) {
-  // TODO ?
-  return Scalar();
+  if (!opaque_decl) {
+    return Scalar();
+  }
+
+  auto* rd = static_cast<RustDecl*>(opaque_decl)->AsVal();
+
+  if (!rd) {
+    return Scalar();
+  }
+
+  return rd->value;
 }
 
 CompilerType TypeSystemRust::GetTypeForDecl(void* opaque_decl) {
@@ -1716,13 +1911,9 @@ CompilerType TypeSystemRust::GetTypeForDecl(void* opaque_decl) {
     return CompilerType();
   }
 
-  auto* rd = static_cast<RustDeclBase*>(opaque_decl)->AsDecl();
+  auto* rd = static_cast<RustDecl*>(opaque_decl);
 
-  if (!rd) {
-    return CompilerType();
-  }
-
-  return rd->type;
+  return rd->GetType();
 }
 
 // ---------------------- CompilerDeclContext functions --------------------- //
@@ -1743,10 +1934,10 @@ std::vector<CompilerDecl> TypeSystemRust::DeclContextFindDeclByName(
     symbol_file->ParseDeclsForContext(CompilerDeclContext(this, opaque_decl_ctx)
     );
 
-    auto* dc = static_cast<RustDeclBase*>(opaque_decl_ctx)->AsDeclContext();
-    RustDeclBase* base = dc->FindByName(name);
-    if (RustDecl* decl = base ? base->AsDecl() : nullptr) {
-      result.push_back(CompilerDecl(this, decl));
+    auto* dc = static_cast<RustDecl*>(opaque_decl_ctx);
+    RustDecl* base = dc->FindByName(name);
+    if (base) {
+      result.push_back(CompilerDecl(this, base));
     }
   }
   return result;
@@ -1757,9 +1948,8 @@ ConstString TypeSystemRust::DeclContextGetName(void* opaque_decl_ctx) {
     return ConstString();
   }
 
-  auto* dc = static_cast<RustDeclBase*>(opaque_decl_ctx);
-
-  return dc->Name();
+  auto* dc = static_cast<RustDecl*>(opaque_decl_ctx);
+  return dc->name;
 }
 
 ConstString
@@ -1768,22 +1958,21 @@ TypeSystemRust::DeclContextGetScopeQualifiedName(void* opaque_decl_ctx) {
     return ConstString();
   }
 
-  auto* dc = static_cast<RustDeclBase*>(opaque_decl_ctx);
+  auto* dc = static_cast<RustDecl*>(opaque_decl_ctx);
 
-  if (!dc->IsDeclContext()) {
+  if (!dc->IsContext()) {
     return ConstString();
   }
 
-  return dc->AsDeclContext()->QualifiedName();
+  return dc->QualifiedName();
 }
 
 bool TypeSystemRust::DeclContextIsContainedInLookup(
     void* opaque_decl_ctx,
     void* other_opaque_decl_ctx
 ) {
-  auto* decl_ctx = static_cast<RustDeclBase*>(opaque_decl_ctx)->AsDeclContext();
-  auto* other =
-      static_cast<RustDeclBase*>(other_opaque_decl_ctx)->AsDeclContext();
+  auto* decl_ctx = static_cast<RustDecl*>(opaque_decl_ctx);
+  auto* other = static_cast<RustDecl*>(other_opaque_decl_ctx);
 
   if (!decl_ctx || !other) {
     return false;
@@ -2373,10 +2562,11 @@ TypeSystemRust::GetLValueReferenceType(lldb::opaque_compiler_type_t type) {
     return CompilerType();
   }
 
-  auto compiler_type = CompilerType(weak_from_this(), type);
+  auto* pointee_type = static_cast<RustType*>(type);
   ConstString type_name =
-      ConstString(llvm::formatv("&mut {0}", compiler_type.GetTypeName()).str());
+      ConstString(llvm::formatv("&mut {0}", pointee_type->m_name).str());
 
+  auto compiler_type = CompilerType(weak_from_this(), type);
   RustType* rt = new RustType{RustType::NewIndirection(
       type_name,
       m_pointer_byte_size,
@@ -2590,7 +2780,7 @@ CompilerType TypeSystemRust::GetBuiltinTypeByName(ConstString name) {
        RustType{
            UNIT_TYPE_NAME,
            0,
-           RustAggregate{{}, {}, 1, AggregateKind::Tuple}
+           RustAggregate{{}, {}, {}, 1, AggregateKind::Tuple}
        }},
 
       {"i8", RustType{I8_NAME, 1, RustInt{}}},
@@ -2702,7 +2892,9 @@ void TypeSystemRust::ForEachEnumerator(
       if (!callback(
               t->underlying_type,
               ConstString(v.second),
-              llvm::APSInt(llvm::APInt(rt->m_size * 8, v.first, is_signed))
+              llvm::APSInt(
+                  llvm::APInt(rt->m_size * 8, v.first.value_or(0), is_signed)
+              )
           )) {
         break;
       }
@@ -2801,8 +2993,18 @@ CompilerDecl TypeSystemRust::GetStaticFieldWithName(
     lldb::opaque_compiler_type_t type,
     llvm::StringRef name
 ) {
-  // TODO only really need to handle discr
   return CompilerDecl();
+  // if (!type) {
+  //   return CompilerDecl();
+  // }
+
+  // auto* rt = static_cast<RustType*>(type);
+
+  // auto* at = rt->AsAggregate();
+
+  // if (!at) {
+  //   return CompilerDecl();
+  // }
 }
 
 llvm::Expected<CompilerType> TypeSystemRust::GetChildCompilerTypeAtIndex(
@@ -2903,7 +3105,7 @@ llvm::Expected<CompilerType> TypeSystemRust::GetChildCompilerTypeAtIndex(
 
       child_byte_size = size.value();
       child_byte_offset = 0;
-      return t->pointee_type;
+      return {t->pointee_type};
     }
 
   } break;
@@ -3075,9 +3277,26 @@ CompilerType TypeSystemRust::GetTypeTemplateArgument(
 
   switch (rt->VariantKind()) {
   case RustType::Aggregate: {
-    std::vector<CompilerType>& args = rt->AsAggregate()->template_args;
+    auto& args = rt->AsAggregate()->template_args;
     if (idx < args.size()) {
-      return args[idx];
+      auto template_arg = args[idx];
+
+      if (!template_arg.second) {
+        TypeQuery query = TypeQuery(template_arg.first);
+        query.SetFindOne(true);
+        query.AddLanguage(eLanguageTypeRust);
+        TypeResults results{};
+        GetSymbolFile()->FindTypes(query, results);
+        if (auto r = results.GetFirstType()) {
+          auto arg = r->GetFullCompilerType();
+          args[idx].second = arg;
+          return arg;
+        }
+
+        return CompilerType();
+      }
+
+      return template_arg.second.value();
     }
 
     return CompilerType();
@@ -3121,14 +3340,14 @@ CompilerType TypeSystemRust::GetBuiltinTypeForEncodingAndBitSize(
     lldb::Encoding encoding,
     size_t bit_size
 ) {
-  switch (encoding) {
-  case eEncodingUint:
-    // TODO add scoped_name_to_type map,
-  case eEncodingSint:
-  case eEncodingIEEE754:
-  case eEncodingVector:
-    break;
-  }
+  // switch (encoding) {
+  // case eEncodingUint:
+  //   // TODO add scoped_name_to_type map,
+  // case eEncodingSint:
+  // case eEncodingIEEE754:
+  // case eEncodingVector:
+  //   break;
+  // }
   return CompilerType();
 }
 
@@ -3224,7 +3443,11 @@ bool TypeSystemRust::DumpTypeValue(
     );
 
     if (et->variants.contains(discr)) {
-      s.Printf("%s::%s", rt->m_name.AsCString(), et->variants[discr].c_str());
+      s.Printf(
+          "%s::%s",
+          rt->m_name.AsCString(),
+          et->variants[discr].AsCString()
+      );
     } else {
       s.Printf("<invalid> %llu", discr);
     }
@@ -3391,8 +3614,7 @@ TypeSystemRust::QualifyTypeName(const ConstString& name, const DWARFDIE& die) {
 
 void TypeSystemRust::PrintDeclContexts() {
   for (auto& decl : m_decl_contexts) {
-    auto* rd =
-        static_cast<RustDeclContext*>(decl.getSecond().GetOpaqueDeclContext());
+    auto* rd = static_cast<RustDecl*>(decl.getSecond().GetOpaqueDeclContext());
 
     printf(
         "name: %s\nfullname:%s",
@@ -3401,285 +3623,2163 @@ void TypeSystemRust::PrintDeclContexts() {
     );
 
     printf("children {\n");
-    for (auto& child : rd->child_decls) {
-      printf("\t%s,\n", child.getSecond()->Name().AsCString());
+    for (auto& child : *rd->GetChildren()) {
+      printf("\t%s,\n", child.getSecond()->name.AsCString());
     }
 
     printf("}\n\n");
   }
 }
 
-// lldb::TypeSP TypeSystemRust::ParseTypeFromSymbol(
-//     const lldb_private::SymbolContext& sc,
-//     const llvm::pdb::PDBSymbol& type,
-//     bool* type_is_new_ptr
-// ) {
-//   RustType* rt;
-//   auto tag = type.getSymTag();
+TypeSP TypeSystemRust::ParseTypeFromPDB(npdb::PdbTypeSymId type) {
+  // printf("Parsing Type Index: %#x\n", type.index.getIndex());
+  // auto uid = toOpaqueUid(type);
 
-//   switch (tag) {
-//   case PDB_SymType::BuiltinType: {
-//     auto* builtin_type = llvm::dyn_cast<PDBSymbolTypeBuiltin>(&type);
-//     assert(builtin_type);
-//     PDB_BuiltinType builtin_kind = builtin_type->getBuiltinType();
-//     auto byte_size = builtin_type->getLength();
-//     auto type_name = ConstString(builtin_type->getName());
-//     if (byte_size == 0 && type_name == UNIT_TYPE_NAME) {
-//       rt = new RustType{
-//           RustType::NewAggregate(type_name, 0, 1, AggregateKind::Tuple)
-//       };
-//     }
-//     switch (builtin_kind) {
-//     case PDB_BuiltinType::None:
-//       return nullptr;
-//     case PDB_BuiltinType::Bool:
-//       rt = new RustType{RustType::NewBool(type_name)};
-//       break;
+  SymbolFileNativePDB* pdb =
+      static_cast<SymbolFileNativePDB*>(GetSymbolFile()->GetBackingSymbolFile()
+      );
 
-//     case PDB_BuiltinType::Char32:
-//       rt = new RustType{RustType::NewChar(type_name)};
-//       break;
-//     case PDB_BuiltinType::Int:
-//     case PDB_BuiltinType::Long: {
-//       // the type names in rust are hard-coded to microsoft-debugger-compatible
-//       // values. We correct those here so that we don't have to have special
-//       // handling for PDB vs DWARF later down the line
-//       if (type_name == "ptrdiff_t") {
-//         type_name = USIZE_NAME;
-//       } else {
-//         switch (byte_size) {
-//         case 1:
-//           type_name = U8_NAME;
-//           break;
-//         case 2:
-//           type_name = U16_NAME;
-//           break;
-//         case 4:
-//           type_name = U32_NAME;
-//           break;
-//         case 8:
-//           type_name = U64_NAME;
-//           break;
-//         case 16:
-//           type_name = U128_NAME;
-//           break;
-//         }
-//       }
+  PdbIndex& index = pdb->GetIndex();
 
-//       rt = new RustType{RustType::NewUInt(type_name, byte_size)};
-//     } break;
-//     case PDB_BuiltinType::UInt:
-//     case PDB_BuiltinType::ULong: {
-//       // the type names in rust are hard-coded to microsoft-debugger-compatible
-//       // values. We correct those here so that we don't have to have special
-//       // handling for PDB vs DWARF later down the line
+  // printf("Parsing Type Index: %#x\n", type.index.getIndex());
 
-//       if (type_name == "size_t") {
-//         type_name = USIZE_NAME;
-//       } else {
-//         switch (byte_size) {
-//         case 1:
-//           type_name = U8_NAME;
-//           break;
-//         case 2:
-//           type_name = U16_NAME;
-//           break;
-//         case 4:
-//           type_name = U32_NAME;
-//           break;
-//         case 8:
-//           type_name = U64_NAME;
-//           break;
-//         case 16:
-//           type_name = U128_NAME;
-//           break;
-//         }
-//       }
+  // if (type.index.getIndex() == 0x1099) {
+  //   printf("Parsing &sample::Number\n");
+  // }
 
-//       rt = new RustType{RustType::NewUInt(type_name, byte_size)};
-//     } break;
-//     case PDB_BuiltinType::Float: {
-//       switch (byte_size) {
-//       case 2:
-//         type_name = F16_NAME;
-//         break;
-//       case 4:
-//         type_name = F32_NAME;
-//         break;
-//       case 8:
-//         type_name = F64_NAME;
-//         break;
-//       default:
-//         break;
-//       }
+  // there aren't a ton of forward decls in Rust, but SumType parsing ends up
+  // with a few for the variant types (e.g. enum2$<example::Enum>::Variant0)
 
-//       rt = new RustType{RustType::NewFloat(type_name, byte_size)};
-//     } break;
+  // TODO check cache first
 
-//     case PDB_BuiltinType::BCD:
-//     case PDB_BuiltinType::Currency:
-//     case PDB_BuiltinType::Date:
-//     case PDB_BuiltinType::Variant:
-//     case PDB_BuiltinType::Complex:
-//     case PDB_BuiltinType::Bitfield:
-//     case PDB_BuiltinType::BSTR:
-//     case PDB_BuiltinType::HResult:
-//     case PDB_BuiltinType::Char:
-//     case PDB_BuiltinType::WCharT:
-//     case PDB_BuiltinType::Char16:
-//     case PDB_BuiltinType::Char8:
-//       break;
-//     }
+  std::optional<PdbTypeSymId> fwd_ref = {};
 
-//     CompilerType ct = CompilerType(weak_from_this(), rt);
+  lldb::user_id_t uid = toOpaqueUid(type);
+  if (pdb->GetTypeMap().contains(uid)) {
+    // printf("<found in type map>\n");
+    return pdb->GetTypeMap()[uid];
+  }
 
-//     return GetSymbolFile()->MakeType(
-//         builtin_type->getSymIndexId(),
-//         type_name,
-//         std::make_optional(byte_size),
-//         nullptr,
-//         LLDB_INVALID_UID,
-//         Type::eEncodingIsUID,
-//         Declaration(),
-//         ct,
-//         Type::ResolveState::Full
-//     );
-//   } break;
-//   case PDB_SymType::UDT: {
-//     const auto* udt = llvm::dyn_cast<PDBSymbolTypeUDT>(&type);
-//     assert(udt);
+  TypeSP type_sp;
+  if (type.index.isSimple()) {
+    type_sp = ParseSimpleTypePDB(type);
+    if (type_sp) {
+      pdb->GetTypeMap()[uid] = type_sp;
+      pdb->InsertNameToType(type_sp);
+    }
+    return type_sp;
+  }
 
-//     auto* decl_context = static_cast<RustDeclContext*>(
-//         GetDeclContextContainingSymbol(type).GetOpaqueDeclContext()
-//     );
+  auto t = index.tpi().findFullDeclForForwardRef(type.index);
+  if (t) {
+    fwd_ref = type;
+    type = PdbTypeSymId(t.get());
+    uid = toOpaqueUid(type);
+    if (fwd_ref.value().index != type.index) {
+      // printf("FwdRef of: %#x\n", type.index.getIndex());
+    }
+    if (pdb->GetTypeMap().contains(uid)) {
+      // printf("<found in type map>\n");
+      return pdb->GetTypeMap()[uid];
+    }
+  }
 
-//     auto type_name = ConstString(udt->getName());
+  if (pdb->ParsingStarted(uid)) {
+    // printf("<parsing already started>\n");
+    return nullptr;
+  }
 
-//     AggregateKind kind = AggregateKind::Struct;
+  pdb->StartParsing(uid);
 
-//     if (udt->getUdtKind() == PDB_UdtType::Union) {
-//       kind = AggregateKind::Union;
-//     } else if (type_name.GetStringRef().starts_with("tuple$")) {
-//       // tuples are intrinsics so they should never be qualified
-//       kind = AggregateKind::Tuple;
-//     }
+  CVType cvt = index.tpi().getType(type.index);
 
-//     type_name = NormalizeMsvcTypeName(type_name.GetStringRef());
+  switch (cvt.kind()) {
+  case LF_MODIFIER: {
+    ModifierRecord modifier;
+    llvm::cantFail(
+        TypeDeserializer::deserializeAs<ModifierRecord>(cvt, modifier)
+    );
 
-//     RustType* rt = new RustType{
-//         // TODO does getLength return the size?
-//         // oh you thought PDB would have alignment data? Lol. Lmao even.
-//         RustType::NewAggregate(type_name, udt->getLength(), 1, kind)
-//     };
+    type_sp = ParseModifierTypePDB(modifier);
+  } break;
+  case LF_POINTER: {
+    PointerRecord pointer;
+    llvm::cantFail(TypeDeserializer::deserializeAs<PointerRecord>(cvt, pointer)
+    );
+    type_sp = ParsePointerTypePDB(type, pointer);
+  } break;
+  case LF_CLASS:
+  case LF_STRUCTURE:
+  case LF_UNION:
+  case LF_ENUM: {
+    CVTagRecord tag = CVTagRecord::create(cvt);
+    if (tag.kind() == CVTagRecord::Union) {
+      auto u_tag = tag.asUnion();
 
-//     // TODO static function on PDBASTParser? (taken from PDBASTParserClang)
-//     Declaration decl{};
-//     auto& raw_sym = type.getRawSymbol();
-//     auto first_line_up = raw_sym.getSrcLineOnTypeDefn();
+      type_sp = ParseAggregateTypePDB(type, u_tag, u_tag.getSize());
+    } else if (tag.kind() == CVTagRecord::Enum) {
+      type_sp = ParseEnumTypePDB(type.index, tag.asEnum());
+    } else {
+      auto c_tag = tag.asClass();
+      type_sp = ParseAggregateTypePDB(type.index, c_tag, c_tag.getSize());
+    }
 
-//     if (!first_line_up) {
-//       auto lines_up = type.getSession().findLineNumbersByAddress(
-//           raw_sym.getVirtualAddress(),
-//           raw_sym.getLength()
-//       );
-//       if (lines_up) {
-//         first_line_up = lines_up->getNext();
-//       }
-//     }
+  } break;
+  case LF_ARRAY: {
+    ArrayRecord record;
+    llvm::cantFail(TypeDeserializer::deserializeAs<ArrayRecord>(cvt, record));
 
-//     if (first_line_up) {
-//       uint32_t src_file_id = first_line_up->getSourceFileId();
+    auto underlying = ParseTypeFromPDB(record.ElementType);
 
-//       auto src_file_up = type.getSession().getSourceFileById(src_file_id);
+    // size is the total size of the array in bytes, not the element count
+    uint64_t element_count =
+        record.Size / underlying->GetByteSize(nullptr).value_or(1);
 
-//       FileSpec spec(src_file_up->getFileName());
-//       decl.SetFile(spec);
-//       decl.SetColumn(first_line_up->getColumnNumber());
-//       decl.SetLine(first_line_up->getLineNumber());
-//     }
+    // TODO leak
+    // we normalize the type name here so that the output is identical to
+    // DWARF data, thus we don't have to have any special handling down
+    // the line
+    RustType* rt = new RustType{RustType::NewArray(
+        ConstString(
+            llvm::formatv("[{0};{1}]", underlying->GetName(), element_count)
+                .str()
+        ),
+        underlying->GetFullCompilerType(),
+        element_count
+    )};
 
-//     Type::ResolveState res_state = Type::ResolveState::Forward;
+    // these should be equal already but just in case
+    rt->m_size = record.Size;
 
-//     auto children = udt->findAllChildren();
-//     if (!children || children->getChildCount() == 0) {
-//       res_state = Type::ResolveState::Full;
-//     } else {
-//       auto c = children->getNext();
-//     }
+    auto compiler_type = CompilerType(weak_from_this(), rt);
 
-//     return GetSymbolFile()->MakeType(
-//         type.getSymIndexId(),
-//         ConstString(type_name),
-//         udt->getLength(),
-//         nullptr,
-//         LLDB_INVALID_UID,
-//         lldb_private::Type::eEncodingIsUID,
-//         decl,
-//         CompilerType(weak_from_this(), rt),
-//         res_state
-//     );
+    type_sp = GetSymbolFile()->MakeType(
+        toOpaqueUid(type),
+        compiler_type.GetTypeName(),
+        rt->m_size,
+        nullptr,
+        LLDB_INVALID_UID,
+        Type::eEncodingIsUID,
+        Declaration(),
+        compiler_type,
+        Type::ResolveState::Full
+    );
+  } break;
+  case LF_PROCEDURE: {
+    ProcedureRecord pr;
+    llvm::cantFail(TypeDeserializer::deserializeAs<ProcedureRecord>(cvt, pr));
+    type_sp = ParseFunctionTypePDB(type, pr);
+  } break;
+  case LF_MFUNCTION:
+    break;
+  default:
+    break;
+  }
 
-//   } break;
-//   case PDB_SymType::Enum: {
-//     const auto* enum_type = llvm::dyn_cast<PDBSymbolTypeEnum>(&type);
-//     assert(enum_type);
-//   } break;
-//   case PDB_SymType::Typedef:
-//     break;
-//   case PDB_SymType::Function:
-//   case PDB_SymType::FunctionSig:
-//     break;
-//   case PDB_SymType::ArrayType:
-//     break;
-//   case PDB_SymType::PointerType:
-//     break;
+  if (type_sp) {
+    pdb->GetTypeMap()[uid] = type_sp;
+    pdb->InsertNameToType(type_sp);
+    if (fwd_ref) {
+      pdb->GetTypeMap()[toOpaqueUid(*fwd_ref)] = type_sp;
+    }
+  }
 
-//   default:
-//     break;
-//   }
-// }
+  pdb->DoneParsing(uid);
+  // printf("Done parsing: %#llx\n", uid);
 
-// // TODO all below this
+  return type_sp;
+}
 
-// lldb_private::ConstString TypeSystemRust::ConstructDemangledNameFromSymbol(
-//     const llvm::pdb::PDBSymbol& symbol
-// ) {}
+void TypeSystemRust::FillIndirectionTypes(
+    CompilerType type,
+    lldb::user_id_t type_idx
+) {
+  auto* pointee = static_cast<RustType*>(type.GetOpaqueQualType());
 
-// lldb_private::Function* TypeSystemRust::ParseFunctionFromSymbol(
-//     lldb_private::CompileUnit& comp_unit,
-//     const llvm::pdb::PDBSymbol& symbol,
-//     const lldb_private::AddressRange& range
-// ) {}
+  auto* pdb =
+      static_cast<SymbolFileNativePDB*>(GetSymbolFile()->GetBackingSymbolFile()
+      );
 
-// bool TypeSystemRust::CompleteTypeFromSymbol(
-//     const llvm::pdb::PDBSymbol& symbol,
-//     lldb_private::Type* type,
-//     lldb_private::CompilerType& compiler_type
-// ) {}
+  { // &
+    // TODO leak
 
-// lldb_private::CompilerDecl
-// TypeSystemRust::GetDeclForSymbol(const llvm::pdb::PDBSymbol& symbol) {}
+    RustType* ref = new RustType{RustType::NewIndirection(
+        ConstString(llvm::formatv("&{0}", pointee->m_name).str()),
+        m_pointer_byte_size,
+        type,
+        DW_TAG_reference_type
+    )};
 
-// lldb_private::CompilerDeclContext
-// TypeSystemRust::GetDeclContextForSymbol(const llvm::pdb::PDBSymbol& symbol) {}
+    auto ct = CompilerType(weak_from_this(), ref);
 
-// lldb_private::CompilerDeclContext
-// TypeSystemRust::GetDeclContextContainingSymbol(
-//     const llvm::pdb::PDBSymbol& symbol
-// ) {}
+    pdb->InsertNameToType(pdb->MakeType(
+        type_idx,
+        ref->m_name,
+        ref->m_size,
+        nullptr,
+        LLDB_INVALID_UID,
+        Type::eEncodingIsLValueReferenceUID,
+        Declaration(),
+        ct,
+        Type::ResolveState::Full
+    ));
+  }
 
-// // virtual void EnsureAllDIEsInDeclContextHaveBeenParsed(
-// //     CompilerDeclContext decl_context) = 0;
+  { // &mut
+    RustType* mut_ref = new RustType{RustType::NewIndirection(
+        ConstString(llvm::formatv("&mut {0}", pointee->m_name).str()),
+        m_pointer_byte_size,
+        type,
+        DW_TAG_reference_type
+    )};
 
-// // virtual std::string GetDIEClassTemplateParams(const DWARFDIE &die) = 0;
+    auto ct = CompilerType(weak_from_this(), mut_ref);
 
-// // lldb_private::Type*
-// // TypeSystemRust::GetTypeForSymbol(const llvm::pdb::PDBSymbol& die);
+    pdb->InsertNameToType(pdb->MakeType(
+        type_idx,
+        mut_ref->m_name,
+        mut_ref->m_size,
+        nullptr,
+        LLDB_INVALID_UID,
+        Type::eEncodingIsLValueReferenceUID,
+        Declaration(),
+        ct,
+        Type::ResolveState::Full
+    ));
+  }
 
-// void TypeSystemRust::ParseDeclsForDeclContext(
-//     const lldb_private::CompilerDeclContext decl_context
-// ) {}
+  { // *const
+    RustType* ptr = new RustType{RustType::NewIndirection(
+        ConstString(llvm::formatv("*const {0}", pointee->m_name).str()),
+        m_pointer_byte_size,
+        type,
+        DW_TAG_pointer_type
+    )};
 
-// static lldb::AccessType GetAccessTypeFromDWARF(uint32_t
-// dwarf_accessibility);
+    auto ct = CompilerType(weak_from_this(), ptr);
+
+    pdb->InsertNameToType(pdb->MakeType(
+        type_idx,
+        ptr->m_name,
+        ptr->m_size,
+        nullptr,
+        LLDB_INVALID_UID,
+        Type::eEncodingIsPointerUID,
+        Declaration(),
+        ct,
+        Type::ResolveState::Full
+    ));
+  }
+
+  { // *mut
+    RustType* mut_ptr = new RustType{RustType::NewIndirection(
+        ConstString(llvm::formatv("*mut {0}", pointee->m_name).str()),
+        m_pointer_byte_size,
+        type,
+        DW_TAG_pointer_type
+    )};
+
+    auto ct = CompilerType(weak_from_this(), mut_ptr);
+
+    pdb->InsertNameToType(pdb->MakeType(
+        type_idx,
+        mut_ptr->m_name,
+        mut_ptr->m_size,
+        nullptr,
+        LLDB_INVALID_UID,
+        Type::eEncodingIsPointerUID,
+        Declaration(),
+        ct,
+        Type::ResolveState::Full
+    ));
+  }
+}
+
+TypeSP TypeSystemRust::ParseSimpleTypePDB(npdb::PdbTypeSymId type) {
+  auto idx = type.index;
+  if (idx == TypeIndex::NullptrT()) {
+    // does rust even generate a nullptr type?
+    assert(0);
+  }
+
+  // Indirect types are near/far/etc. pointers, which we don't really care about
+  // the intricacies of. We just get the underlying type and spit out a `*mut T`
+  if (idx.getSimpleMode() != SimpleTypeMode::Direct) {
+    TypeSP direct_type = ParseTypeFromPDB(idx.makeDirect());
+    if (!direct_type) {
+      return nullptr;
+    }
+
+    uint32_t pointer_size = 0;
+    switch (idx.getSimpleMode()) {
+    case SimpleTypeMode::FarPointer32:
+    case SimpleTypeMode::NearPointer32:
+      pointer_size = 4;
+      break;
+    case SimpleTypeMode::NearPointer64:
+      pointer_size = 8;
+      break;
+    default:
+      // 128-bit and 16-bit pointers unsupported.
+      return nullptr;
+    }
+
+    FillIndirectionTypes(direct_type->GetFullCompilerType(), toOpaqueUid(type));
+
+    auto compiler_type =
+        GetPointerType(direct_type->GetFullCompilerType().GetOpaqueQualType());
+
+    return GetSymbolFile()->MakeType(
+        toOpaqueUid(type),
+        compiler_type.GetTypeName(),
+        pointer_size,
+        nullptr,
+        LLDB_INVALID_UID,
+        Type::eEncodingIsPointerUID,
+        Declaration(),
+        compiler_type,
+        Type::ResolveState::Full
+    );
+  }
+
+  auto simple_type = idx.getSimpleKind();
+
+  if (simple_type == SimpleTypeKind::NotTranslated) {
+    return nullptr;
+  }
+
+  size_t size = GetTypeSizeForSimpleKind(simple_type);
+  RustType* rt;
+  // Even though some of these are invalid for Rust (e.g. bool can only be 8
+  // bits), I'm hesitant to ignore any. I'll leave out the complex types since
+  // rust for sure doesn't use those
+  switch (simple_type) {
+  case SimpleTypeKind::Void:
+    rt = primitive_types.unit();
+    break;
+  case SimpleTypeKind::Boolean128:
+  case SimpleTypeKind::Boolean16:
+  case SimpleTypeKind::Boolean32:
+  case SimpleTypeKind::Boolean64:
+    // TODO invalid, ignore, panic, treat as a regular bool?
+    // TODO leak
+    rt = new RustType{
+        RustType::NewBool(ConstString("<invalid large-boolean type>"))
+    };
+    break;
+  case SimpleTypeKind::Boolean8:
+    rt = primitive_types.Bool();
+    break;
+  case SimpleTypeKind::Byte:
+  case SimpleTypeKind::UnsignedCharacter:
+    // TODO not sure if narrowcharacter should count
+  case SimpleTypeKind::NarrowCharacter:
+    rt = primitive_types.u8();
+    break;
+  case SimpleTypeKind::SignedCharacter:
+  case SimpleTypeKind::SByte:
+    rt = primitive_types.i8();
+    break;
+  case SimpleTypeKind::Character32:
+    rt = primitive_types.Char();
+    break;
+  case SimpleTypeKind::Character8:
+    // TODO leak
+    rt = new RustType{RustType::NewUInt(ConstString("<char8_t>"), 1)};
+    break;
+  case SimpleTypeKind::WideCharacter:
+    // TODO leak
+    rt = new RustType{RustType::NewUInt(ConstString("<wchar_t>"), 2)};
+    break;
+  case SimpleTypeKind::Character16:
+    // TODO leak
+    rt = new RustType{RustType::NewUInt(ConstString("<char16_t>"), 8)};
+    break;
+
+  case SimpleTypeKind::Int16Short:
+  case SimpleTypeKind::Int16:
+    rt = primitive_types.i16();
+    break;
+  case SimpleTypeKind::UInt16Short:
+  case SimpleTypeKind::UInt16:
+    rt = primitive_types.u16();
+    break;
+  case SimpleTypeKind::Int32Long:
+  case SimpleTypeKind::Int32:
+    rt = primitive_types.i32();
+    break;
+  case SimpleTypeKind::UInt32Long:
+  case SimpleTypeKind::UInt32:
+    rt = primitive_types.u32();
+    break;
+  case SimpleTypeKind::Int64Quad:
+  case SimpleTypeKind::Int64:
+    rt = primitive_types.i64();
+    break;
+  case SimpleTypeKind::UInt64Quad:
+  case SimpleTypeKind::UInt64:
+    rt = primitive_types.u64();
+    break;
+  case SimpleTypeKind::Int128Oct:
+  case SimpleTypeKind::Int128:
+    rt = primitive_types.i128();
+    break;
+  case SimpleTypeKind::UInt128Oct:
+  case SimpleTypeKind::UInt128:
+    rt = primitive_types.u128();
+    break;
+  case SimpleTypeKind::Float16:
+    rt = primitive_types.f16();
+    break;
+  case SimpleTypeKind::Float32:
+    rt = primitive_types.f32();
+    break;
+  case SimpleTypeKind::Float64:
+    rt = primitive_types.f64();
+    break;
+  case SimpleTypeKind::Float128:
+    rt = primitive_types.f128();
+    break;
+  case SimpleTypeKind::Float32PartialPrecision:
+    // TODO leak
+    rt = new RustType{
+        RustType::NewFloat(ConstString("<float_32_partial_precision>"), 4)
+    };
+    break;
+  case SimpleTypeKind::Float48:
+    // TODO leak
+    rt = new RustType{RustType::NewFloat(ConstString("<float_48>"), 6)};
+    break;
+  case SimpleTypeKind::Float80:
+    // TODO leak
+    rt = new RustType{RustType::NewFloat(ConstString("<float_80>"), 10)};
+    break;
+  case SimpleTypeKind::Complex16:
+  case SimpleTypeKind::Complex32:
+  case SimpleTypeKind::Complex32PartialPrecision:
+  case SimpleTypeKind::Complex48:
+  case SimpleTypeKind::Complex64:
+  case SimpleTypeKind::Complex80:
+  case SimpleTypeKind::Complex128:
+  case SimpleTypeKind::None:
+  case SimpleTypeKind::NotTranslated:
+  case SimpleTypeKind::HResult:
+    return nullptr;
+  }
+
+  auto compiler_type = CompilerType(weak_from_this(), rt);
+
+  return GetSymbolFile()->MakeType(
+      toOpaqueUid(type),
+      rt->m_name,
+      size,
+      nullptr,
+      LLDB_INVALID_UID,
+      Type::eEncodingIsUID,
+      Declaration(),
+      compiler_type,
+      Type::ResolveState::Full
+  );
+}
+
+TypeSP TypeSystemRust::ParseModifierTypePDB(ModifierRecord& modifier) {
+  // TODO handle modifiers once there are some
+  return ParseTypeFromPDB(modifier.ModifiedType);
+}
+
+TypeSP TypeSystemRust::ParsePointerTypePDB(
+    npdb::PdbTypeSymId type,
+    PointerRecord& pointer
+) {
+  auto pointee_type = ParseTypeFromPDB(pointer.getReferentType());
+
+  // printf("pointer type: %s\n", pointee_type->GetName().AsCString());
+
+  // "This can happen for pointers to LF_VTSHAPE records, which we shouldn't
+  // create in the AST." - Clang PdbAstBuilder implementation
+  // We also ignore pointer-to-member because it shouldn't be possible in rust
+  // (and is EXCEEDINGLY rare in C++ anyway. What a weird language feature)
+  if (!pointee_type || pointer.isPointerToMember()) {
+    return {};
+  }
+
+  FillIndirectionTypes(pointee_type->GetFullCompilerType(), toOpaqueUid(type));
+
+  m_pointer_byte_size = pointer.getSize();
+
+  Type::EncodingDataType encoding = Type::eEncodingIsPointerUID;
+  auto* pointee_rt = static_cast<RustType*>(
+      pointee_type->GetFullCompilerType().GetOpaqueQualType()
+  );
+  CompilerType compiler_type;
+
+  switch (pointer.getMode()) {
+  case PointerMode::RValueReference:
+  case PointerMode::LValueReference: {
+    encoding = Type::eEncodingIsLValueReferenceUID;
+
+    compiler_type = GetLValueReferenceType(pointee_rt);
+  } break;
+  default: {
+    compiler_type = GetPointerType(pointee_rt);
+  } break;
+  }
+
+  // may as well avoid some of the instruction cache uncertainty of the
+  // CompilerType functions
+  auto* pointer_rt = static_cast<RustType*>(compiler_type.GetOpaqueQualType());
+
+  auto type_sp = GetSymbolFile()->MakeType(
+      toOpaqueUid(type),
+      pointer_rt->m_name,
+      pointer_rt->m_size,
+      nullptr,
+      LLDB_INVALID_UID,
+      encoding,
+      Declaration(),
+      compiler_type,
+      Type::ResolveState::Full
+  );
+
+  return type_sp;
+}
+
+TypeSP TypeSystemRust::ParseAggregateTypePDB(
+    PdbTypeSymId type,
+    const TagRecord& record,
+    uint32_t size
+) {
+  SymbolFileNativePDB* pdb =
+      static_cast<SymbolFileNativePDB*>(GetSymbolFile()->GetBackingSymbolFile()
+      );
+  PdbIndex& index = pdb->GetIndex();
+  // make sure we use the item stream `ipi`
+  auto x = index.ipi().typeArray();
+
+  Declaration decl;
+
+  // iterate over the item leaves to check for a source line listing that
+  // matches the type we have
+  for (auto& cvt : x) {
+    if (cvt.kind() == llvm::codeview::LF_UDT_MOD_SRC_LINE) {
+      auto src_data = llvm::cantFail(
+          TypeDeserializer::deserializeAs<UdtModSourceLineRecord>(cvt.data())
+      );
+
+      // if it matches our type, we look up the string and add the file path to
+      // the decl
+      if (src_data.UDT == type.index) {
+        auto file = src_data.SourceFile;
+
+        auto string_table = index.pdb().getStringTable();
+        if (string_table) {
+          auto st = string_table.get();
+          auto file_name = st.getStringForID(file.getIndex());
+          if (file_name) {
+            FileSpec f = FileSpec(file_name.get());
+            decl.SetFile(f);
+          }
+        }
+        break;
+      }
+    }
+  }
+
+  // TODO declcontext
+
+  auto name = ConstString(record.getName());
+
+  auto name_ref = name.GetStringRef();
+
+  CompilerType compiler_type;
+
+  // At this point we can't determine if it's a struct or a tuple struct
+  // since we need the name of the first field.
+  AggregateKind agg_kind;
+  // "enum2$<" will always be an unqualified prefix for a sum-type, with the
+  // sole "template arg" being the sum-type itself. The variant types are
+  // emitted with the nested-type flag, and we absolutely don't want to put the
+  // variants through ParseSumTypePDB
+  if (name_ref.starts_with("enum2$<") && !record.isNested()) {
+    compiler_type = ParseSumTypePDB(type, record, size);
+  } else {
+
+    if (name_ref.starts_with("tuple$<")) {
+      agg_kind = AggregateKind::Tuple;
+      // auto new_name = name.GetStringRef().substr(7);
+      // if (new_name.ends_with(" >")) {
+      //   new_name = new_name.substr(0, new_name.size() - 2);
+      // } else {
+      //   new_name = new_name.substr(0, new_name.size() - 1);
+      // }
+
+      // name = ConstString(llvm::formatv("({0})", new_name).str());
+    } else {
+      if (record.Kind == llvm::codeview::TypeRecordKind::Union) {
+        agg_kind = AggregateKind::Union;
+      } else {
+        agg_kind = AggregateKind::Struct;
+      }
+    }
+
+    name = NormalizeMSVCTypeName(name.GetStringRef());
+
+    // We set the alignment to 1 because CodeView doesn't store it (very cool,
+    // thanks CodeView). Rust and C both agree that the alignment is at least
+    // the maximum alignemnt of any of its fields, so we'll properly populate it
+    // once we've process the fields. See:
+    // https://doc.rust-lang.org/reference/type-layout.html#r-layout.repr.rust.layout
+    // https://learn.microsoft.com/en-us/cpp/c-language/alignment-c?view=msvc-170#remarks
+    RustType* rt =
+        new RustType{RustType::NewAggregate(name, size, 1, agg_kind)};
+
+    RustAggregate* agg = rt->AsAggregate();
+    ParseFieldListPDB(record, agg->fields, agg->static_fields);
+
+    uint64_t align = 1;
+
+    for (auto& field : agg->fields) {
+      if (field.byte_align > align) {
+        align = field.byte_align;
+      }
+    }
+
+    agg->align = align;
+
+    // Might be better to check if every field is named like this, but there's
+    // not really a point. This field-name check is the only way to
+    // differentiate a struct from a tuple struct as far as I'm aware. In the
+    // degenerate case, a user can name all of the fields identically to a tuple
+    // struct (e.g. `__0`,
+    // `__1`, etc.) so checking more doesn't really save us.
+    if (agg->kind == AggregateKind::Struct && !agg->fields.empty() &&
+        agg->fields.at(0).name.GetStringRef() == "__0") {
+      agg->kind = AggregateKind::TupleStruct;
+    }
+
+    // for tuples/tuple structs we normalize the name here (e.g. `__0` -> `0`)
+    // so that the visualizers don't have to do it. This saves us from needing
+    // to make synthetics for types that otherwise wouldn't need one, or do the
+    // same string processing multiple times later
+    if (agg->kind == AggregateKind::TupleStruct ||
+        agg->kind == AggregateKind::Tuple) {
+      for (auto& f : agg->fields) {
+        f.name = ConstString(f.name.GetStringRef().substr(2));
+      }
+    }
+
+    auto [_, args] = GetTemplateArgs(name);
+    for (auto& t : args) {
+      // TypeResults results{};
+      // TypeQuery query = TypeQuery(t);
+      // query.SetFindOne(true);
+      // query.AddLanguage(eLanguageTypeRust);
+      // // query.SetLanguages(LanguageSet().Insert(lldb::LanguageType
+      // language)) GetSymbolFile()->FindTypes(query, results); if (auto r =
+      // results.GetFirstType()) {
+      //   agg->template_args.push_back(std::make_pair(t,
+      //   r->GetFullCompilerType())
+      //   );
+      // } else {
+
+      agg->template_args.push_back(std::make_pair(t, std::nullopt));
+      // }
+    }
+
+    compiler_type = CompilerType(weak_from_this(), rt);
+  }
+
+  return GetSymbolFile()->MakeType(
+      toOpaqueUid(type),
+      static_cast<RustType*>(compiler_type.GetOpaqueQualType())->m_name,
+      static_cast<RustType*>(compiler_type.GetOpaqueQualType())->m_size,
+      nullptr,
+      LLDB_INVALID_UID,
+      Type::eEncodingIsUID,
+      decl,
+      compiler_type,
+      Type::ResolveState::Full
+  );
+}
+
+void TypeSystemRust::ParseFieldListPDB(
+    const TagRecord& record,
+    std::vector<FieldAttributes>& fields,
+    std::vector<std::pair<ConstString, CompilerType>>& static_fields
+) {
+
+  SymbolFileNativePDB* pdb =
+      static_cast<SymbolFileNativePDB*>(GetSymbolFile()->GetBackingSymbolFile()
+      );
+  PdbIndex& index = pdb->GetIndex();
+
+  auto field_list_idx = record.getFieldList();
+
+  // early exit if the field list is empty
+  if (field_list_idx.isSimple()) {
+    return;
+  }
+  auto cvt = index.tpi().getType(field_list_idx);
+
+  auto reader = llvm::BinaryStreamReader(cvt.data(), llvm::endianness::little);
+  auto field_iter = FieldListDeserializer(reader);
+
+  bool cont = true;
+  while (cont) {
+    CVMemberRecord member;
+
+    if (auto e = reader.readEnum(member.Kind)) {
+      consumeError(std::move(e));
+      break;
+    }
+    if (auto e = field_iter.visitMemberBegin(member)) {
+      consumeError(std::move(e));
+      break;
+    }
+    switch (member.Kind) {
+    case LF_MEMBER: {
+      DataMemberRecord field_data;
+      if (auto e = field_iter.visitKnownMember(member, field_data)) {
+        consumeError(std::move(e));
+        cont = false;
+        break;
+      }
+
+      TypeSP t = ParseTypeFromPDB(PdbTypeSymId(field_data.getType()));
+      if (t) {
+        CompilerType ct = t->GetFullCompilerType();
+
+        uint32_t offset = field_data.getFieldOffset();
+
+        fields.push_back(FieldAttributes{
+            // TODO is 1 an okay default align for a field? Does align matter
+            // for
+            // a field?
+            ct.GetTypeBitAlign(nullptr).value_or(8) / 8,
+            offset,
+            ConstString(field_data.getName()),
+            ct,
+            field_data.getAccess() == llvm::codeview::MemberAccess::Public
+                ? lldb::AccessType::eAccessPublic
+                : lldb::AccessType::eAccessPrivate
+        });
+      }
+    } break;
+    // TODO
+    case LF_STMEMBER: {
+      StaticDataMemberRecord field_data;
+      if (auto e = field_iter.visitKnownMember(member, field_data)) {
+        consumeError(std::move(e));
+        cont = false;
+        break;
+      }
+
+      TypeSP t = ParseTypeFromPDB(PdbTypeSymId(field_data.getType()));
+      CompilerType ct = t->GetFullCompilerType();
+
+      static_fields.push_back(
+          std::make_pair(ConstString(field_data.getName()), ct)
+      );
+
+    } break;
+    default:
+      break;
+    }
+
+    if (auto e = field_iter.visitMemberEnd(member)) {
+      break;
+    }
+  }
+}
+
+lldb::TypeSP TypeSystemRust::ParseEnumTypePDB(
+    npdb::PdbTypeSymId type,
+    const llvm::codeview::EnumRecord& record
+) {
+  CompilerType underlying_type =
+      ParseTypeFromPDB(record.UnderlyingType)->GetFullCompilerType();
+  RustType* rt = new RustType{
+      RustType::NewCStyleEnum(ConstString(record.Name), underlying_type)
+  };
+  RustCStyleEnumType* enum_type = rt->AsCStyleEnum();
+
+  // ~identical parsing to Aggregate types, but with the EnumeratorRecord. Kept
+  // separate mostly for sanity reasons, as covering all the cases in 1 function
+  // gets really ugly.
+
+  // TODO maybe put this chunk in a GetFieldIter method?
+  SymbolFileNativePDB* pdb =
+      static_cast<SymbolFileNativePDB*>(GetSymbolFile()->GetBackingSymbolFile()
+      );
+  PdbIndex& index = pdb->GetIndex();
+
+  auto field_list_idx = record.getFieldList();
+  auto cvt = index.tpi().getType(field_list_idx);
+
+  auto reader = llvm::BinaryStreamReader(cvt.data(), llvm::endianness::little);
+  auto field_iter = FieldListDeserializer(reader);
+
+  bool cont = true;
+  while (cont) {
+    CVMemberRecord member;
+
+    if (auto e = reader.readEnum(member.Kind)) {
+      consumeError(std::move(e));
+      break;
+    }
+    if (auto e = field_iter.visitMemberBegin(member)) {
+      consumeError(std::move(e));
+      break;
+    }
+
+    switch (member.Kind) {
+    case llvm::codeview::LF_ENUMERATE: {
+      EnumeratorRecord enum_record;
+      if (auto e = field_iter.visitKnownMember(member, enum_record)) {
+        consumeError(std::move(e));
+        cont = false;
+        break;
+      }
+
+      enum_type->variants.insert(std::pair(
+          underlying_type.IsSigned() ? enum_record.Value.getExtValue()
+                                     : enum_record.Value.getZExtValue(),
+          ConstString(enum_record.Name)
+      ));
+    } break;
+    default:
+      break;
+    }
+
+    CVMemberRecord end;
+    if (auto e = field_iter.visitMemberEnd(end)) {
+      assert(0);
+    }
+  }
+
+  CompilerType compiler_type = CompilerType(weak_from_this(), rt);
+
+  return GetSymbolFile()->MakeType(
+      toOpaqueUid(type),
+      rt->m_name,
+      rt->m_size,
+      nullptr,
+      LLDB_INVALID_UID,
+      Type::eEncodingIsUID,
+      Declaration(),
+      compiler_type,
+      Type::ResolveState::Full
+  );
+}
+
+void TypeSystemRust::TemplateArgsFromTypeName(
+    const llvm::StringRef name,
+    std::vector<CompilerType>& template_args
+) {
+  auto [root_name, args] = name.split('<');
+
+  if (args.size() == 0) {
+    return;
+  }
+
+  assert(args.ends_with('>'));
+  args = args.substr(0, args.size() - 1);
+
+  std::vector<llvm::StringRef> arg_vec{};
+  uint32_t len = args.size();
+  uint32_t start = 0;
+
+  for (uint32_t i = 0; i < len; ++i) {
+    if (args[i] == ',') {
+      auto arg = args.substr(start, i).trim();
+      // index->tpi().findRecordsByName();
+
+      start = i + 1;
+    }
+  }
+
+  // we already cut off the trailing `>` above, so now we need to handle the
+  // case where there wasn't a trailing `,`
+  auto last = args.substr(start).trim();
+  if (last.size() != 0) {
+    arg_vec.push_back(last);
+  }
+}
+
+CompilerType TypeSystemRust::ParseSumTypePDB(
+    npdb::PdbTypeSymId type,
+    const llvm::codeview::TagRecord& record,
+    uint32_t size
+) {
+  /*
+  per rust documentation, this is how the debug info for sum types looks.
+  ```c
+  union enum2$<{fully-qualified-name}> {
+    struct Variant0 {
+      struct {name-of-variant-0} {
+         <variant 0 fields>
+      } value;
+      static VariantNames NAME = {name-of-variant-0};
+      static uint64_t DISCR_EXACT = {discriminant-of-variant-0};
+    } variant0;
+    <other variant structs>
+    int_type tag;
+    enum VariantNames {
+       <name-of-variant-0> = 0, // The numeric values are variant index,
+       <name-of-variant-1> = 1, // not discriminant values.
+       <name-of-variant-2> = 2,
+       ...
+    }
+  }
+  ```
+*/
+
+  SymbolFileNativePDB* pdb =
+      static_cast<SymbolFileNativePDB*>(GetSymbolFile()->GetBackingSymbolFile()
+      );
+  PdbIndex& index = pdb->GetIndex();
+
+  auto field_list_idx = record.getFieldList();
+  auto cvt = index.tpi().getType(field_list_idx);
+
+  auto reader = llvm::BinaryStreamReader(cvt.data(), llvm::endianness::little);
+  auto field_iter = FieldListDeserializer(reader);
+
+  // TODO leak
+  auto* rt = new RustType{RustType::NewSumType(
+      ConstString(record.getName()),
+      size,
+      {},
+      CompilerType()
+  )};
+
+  auto* st = rt->AsSumType();
+
+  // if the discr is 128 bits, it gets split in half and needs to be
+  // reconstructed keep in mind, the type of the `tag` variable is accurate,
+  // while the `DISCR_*` static fields of the variants are always output as
+  // u64's by the rust compiler
+  bool discr_128 = false;
+  bool cont = true;
+  while (cont) {
+    CVMemberRecord member;
+
+    if (auto e = reader.readEnum(member.Kind)) {
+      consumeError(std::move(e));
+      break;
+    }
+    if (auto e = field_iter.visitMemberBegin(member)) {
+      consumeError(std::move(e));
+      break;
+    }
+    switch (member.Kind) {
+      // all the variants and the discr fall under the `LF_MEMBER` tag
+    case LF_MEMBER: {
+      DataMemberRecord field_data;
+      if (auto e = field_iter.visitKnownMember(member, field_data)) {
+        consumeError(std::move(e));
+        cont = false;
+        break;
+      }
+
+      auto name = field_data.getName();
+
+      if (name.starts_with("tag")) {
+        st->discr_type = ParseTypeFromPDB(PdbTypeSymId(field_data.getType()))
+                             ->GetFullCompilerType();
+      } else {
+        // variants are output with the following property flags:
+        // * nested type
+        // * forward ref
+        // * unique name
+        // ParseTypeFromPDB resolves the foward ref into its full decl, so we
+        // can just call it as normal
+        TypeSP v_typesp = ParseTypeFromPDB(PdbTypeSymId(field_data.getType()));
+        CompilerType v_compilertype = v_typesp->GetFullCompilerType();
+
+        auto* v_rt = static_cast<RustType*>(v_compilertype.GetOpaqueQualType());
+        auto* v_aggregate = v_rt->AsAggregate();
+        RustCStyleEnumType* v_name_enum =
+            static_cast<RustType*>(
+                v_aggregate->static_fields.at(0).second.GetOpaqueQualType()
+            )
+                ->AsCStyleEnum();
+
+        // TODO we manually grab the Names enum type here until the struct
+        // parsing handles static types correctly
+        // field_data.getType();
+        // CVType variant_cvt = index.tpi().getType(
+        //     GetBestPossibleDecl(field_data.getType(), index.tpi()).index
+        // );
+        // CVTagRecord tag = CVTagRecord::create(variant_cvt);
+        // auto field_list = index.tpi().getType(tag.asClass().getFieldList());
+
+        // auto reader = llvm::BinaryStreamReader(
+        //     field_list.data(),
+        //     llvm::endianness::little
+        // );
+        // auto field_iter = FieldListDeserializer(reader);
+
+        // bool cont = true;
+        // while (cont) {
+        //   CVMemberRecord member;
+
+        //   if (auto e = reader.readEnum(member.Kind)) {
+        //     consumeError(std::move(e));
+        //     break;
+        //   }
+        //   if (auto e = field_iter.visitMemberBegin(member)) {
+        //     consumeError(std::move(e));
+        //     break;
+        //   }
+        //   switch (member.Kind) {
+        //   case LF_STMEMBER: {
+        //     StaticDataMemberRecord field_data;
+        //     if (auto e = field_iter.visitKnownMember(member, field_data)) {
+        //       consumeError(std::move(e));
+        //       cont = false;
+        //       break;
+        //     }
+
+        //     TypeSP t = ParseTypeFromPDB(PdbTypeSymId(field_data.getType()));
+        //     CompilerType ct = t->GetFullCompilerType();
+        //     auto* rt = static_cast<RustType*>(ct.GetOpaqueQualType());
+        //     if (rt->IsCStyleEnum()) {
+        //       v_name_enum = static_cast<RustType*>(ct.GetOpaqueQualType())
+        //                         ->AsCStyleEnum();
+        //     } else {
+        //       discr_128 = rt->m_name.GetStringRef()[5] == '1';
+        //     }
+        //   } break;
+        //   default:
+        //     break;
+        //   }
+
+        //   if (auto e = field_iter.visitMemberEnd(member)) {
+        //     break;
+        //   }
+        // }
+
+        // TODO I rely on this field ordering, but i'm not sure if it's
+        // actually guaranteed.
+
+        // the aggregate we have at this point is a struct with:
+        // * a `value` of type VariantN
+        // * a static field NAME
+        // * one or more static fields denoting the discriminant that
+        // identifies this variant
+
+        auto& v_underlying_type = v_aggregate->fields.at(0).underlying_type;
+
+        ConstString const_name_symbol = ConstString(
+            llvm::formatv("{0}::NAME", v_compilertype.GetTypeName()).str()
+        );
+
+        // This is only ever used in for sum types, but it's used like 5 times
+        // so DRY
+        auto get_value_for_constant = [pdb](llvm::StringRef name) {
+          std::optional<uint64_t> value;
+
+          auto& index = pdb->GetIndex();
+
+          auto syms =
+              index.globals().findRecordsByName(name, index.symrecords());
+
+          for (auto& s : syms) {
+            auto cvs = s.second;
+
+            if (cvs.kind() != SymbolKind::S_CONSTANT) {
+              continue;
+            }
+
+            auto symbol = llvm::cantFail(
+                SymbolDeserializer::deserializeAs<ConstantSym>(cvs)
+            );
+
+            value = symbol.Value.getZExtValue();
+            break;
+          }
+
+          return value;
+        };
+
+        auto name_idx =
+            get_value_for_constant(const_name_symbol.GetStringRef());
+
+        // the API on this is a bit weird? Basically the symbol stores an
+        // address range, but ACTUALLY the address range type should be a union
+        // between an address range and the constant value. The following
+        // function extracts the value, but only if the symbol isn't an address.
+        // It used to take a fail value, but I changed it to return an option
+        // because fail values are useless when every u64 value is a potentially
+        // valid discriminant. .value_or() replicates the old behavior, and it
+        // was only ever called in 1 location (SymbolFileDWARFDebugMap) anyway
+
+        // auto name_idx = name_val->GetAddress().GetOffset();
+
+        auto variant_name = v_name_enum
+                                // TODO don't crash if we don't find the value?
+                                ->variants.at(name_idx.value());
+
+        // now we try to get the discriminant for this variant. The name can be
+        // one of several values:
+        // * DISCR_EXACT
+        // * DISCR_BEGIN
+        // * DISCR_END
+        // * DISCR128_EXACT_LO
+        // * DISCR128_EXACT_HI
+        // * DISCR128_BEGIN_LO
+        // * DISCR128_BEGIN_HI
+        // * DISCR128_END_LO
+        // * DISCR128_END_HI
+
+        if (discr_128 ||
+            // for 128 bit discrs, the character will be `_` instead, faster
+            // than checking a whole range of characters
+            v_aggregate->static_fields.at(1).first.GetStringRef()[5] == '1') {
+          /* --------------------- 128 bit discriminant --------------------- */
+
+          discr_128 = true;
+
+          // char at [9] is `B` for discr ranges, otherwise is `E`
+          if (v_aggregate->static_fields.at(1).first.GetStringRef()[9] == 'B') {
+            /* ---------------------------- range --------------------------- */
+
+            // Discr ranges are equivalent to the untagged variant in DWARF. As
+            // far as I'm aware, only 1 variant is allowed to have a range, all
+            // the rest must be exact values, therefore we can just not bother
+            // getting the actual range begin and end values
+
+            st->untagged_variant = st->variants.size();
+            st->variants.push_back(EnumVariant{
+                v_underlying_type,
+                // to match DWARF output
+                ConstString(
+                    llvm::formatv("$variant{0}$", name_idx.value()).str()
+                )
+            });
+
+          } else {
+            /* ---------------------------- exact --------------------------- */
+
+            auto discr_hi = get_value_for_constant(
+                ConstString(llvm::formatv(
+                                "{0}::DISCR128_EXACT_HI",
+                                v_compilertype.GetTypeName()
+                            )
+                                .str())
+                    .GetStringRef()
+            );
+
+            auto discr_lo = get_value_for_constant(
+                ConstString(llvm::formatv(
+                                "{0}::DISCR128_EXACT_LO",
+                                v_compilertype.GetTypeName()
+                            )
+                                .str())
+                    .GetStringRef()
+            );
+
+            std::pair<uint64_t, uint64_t> discr = {
+                discr_lo.value(),
+                discr_hi.value()
+            };
+
+            st->variants.push_back(EnumVariant{
+                v_underlying_type, // to match DWARF output
+                ConstString(
+                    llvm::formatv("$variant{0}$", name_idx.value()).str()
+                )
+            });
+
+            st->discr_map.insert({discr, st->variants.size() - 1});
+          }
+        } else {
+          /* ---------------------- 64 bit discriminant --------------------- */
+
+          // char at [6] is `B` for discr ranges, otherwise is `E`
+          if (v_aggregate->static_fields.at(1).first.GetStringRef()[6] == 'B') {
+            /* ---------------------------- range --------------------------- */
+
+            // Discr ranges are equivalent to the untagged variant in DWARF. As
+            // far as I'm aware, only 1 variant is allowed to have a range, all
+            // the rest must be exact values, therefore we can just not bother
+            // getting the actual range begin and end values
+
+            st->untagged_variant = st->variants.size();
+            st->variants.push_back(EnumVariant{
+                v_underlying_type, // to match DWARF output
+                ConstString(
+                    llvm::formatv("$variant{0}$", name_idx.value()).str()
+                )
+            });
+
+          } else {
+            /* ---------------------------- exact --------------------------- */
+
+            auto discr_lo = get_value_for_constant(
+                ConstString(llvm::formatv(
+                                "{0}::DISCR_EXACT",
+                                v_compilertype.GetTypeName()
+                            )
+                                .str())
+                    .GetStringRef()
+            );
+
+            assert(discr_lo);
+            std::pair<uint64_t, uint64_t> discr{discr_lo.value(), 0};
+
+            st->variants.push_back(EnumVariant{v_underlying_type, variant_name}
+            );
+
+            st->discr_map.insert({discr, st->variants.size() - 1});
+          }
+        }
+      }
+    } break;
+    default:
+      break;
+    }
+
+    if (auto e = field_iter.visitMemberEnd(member)) {
+      break;
+    }
+  }
+
+  rt->m_name = NormalizeMSVCTypeName(rt->m_name.GetStringRef());
+  auto compiler_type = CompilerType(weak_from_this(), rt);
+
+  return compiler_type;
+}
+
+lldb::TypeSP TypeSystemRust::ParseFunctionTypePDB(
+    npdb::PdbTypeSymId type,
+    llvm::codeview::ProcedureRecord pr
+) {
+  SymbolFileNativePDB* pdb =
+      static_cast<SymbolFileNativePDB*>(GetSymbolFile()->GetBackingSymbolFile()
+      );
+  PdbIndex& index = pdb->GetIndex();
+  TpiStream& stream = index.tpi();
+  CVType args_cvt = stream.getType(pr.getArgumentList());
+  ArgListRecord args;
+  llvm::cantFail(TypeDeserializer::deserializeAs<ArgListRecord>(args_cvt, args)
+  );
+
+  llvm::ArrayRef<TypeIndex> arg_indices = llvm::ArrayRef(args.ArgIndices);
+
+  std::vector<CompilerType> arg_types;
+  arg_types.reserve(arg_indices.size());
+
+  for (TypeIndex arg_index : arg_indices) {
+    auto arg_type = ParseTypeFromPDB(arg_index);
+    if (!arg_type)
+      continue;
+    arg_types.push_back(arg_type->GetForwardCompilerType());
+  }
+
+  auto ret_type = ParseTypeFromPDB(pr.ReturnType);
+
+  if (!ret_type) {
+  }
+
+  // TODO leak
+  // TODO function name?
+  RustType* rt = new RustType{RustType::NewFunction(
+      ConstString("func"),
+      arg_types,
+      {},
+      ret_type->GetForwardCompilerType()
+  )};
+
+  auto compiler_type = CompilerType(weak_from_this(), rt);
+
+  return GetSymbolFile()->MakeType(
+      toOpaqueUid(type),
+      rt->m_name,
+      rt->m_size,
+      nullptr,
+      LLDB_INVALID_UID,
+      Type::eEncodingIsUID,
+      Declaration(),
+      compiler_type,
+      Type::ResolveState::Full
+  );
+}
+
+// TODO
+lldb::TypeSP TypeSystemRust::ParseTypedefDecl(const npdb::PdbGlobalSymId& symbol
+) {
+  SymbolFileNativePDB* pdb =
+      static_cast<SymbolFileNativePDB*>(GetSymbolFile()->GetBackingSymbolFile()
+      );
+  PdbIndex& index = pdb->GetIndex();
+
+  CVSymbol cvs = index.ReadSymbolRecord(symbol);
+  if (cvs.kind() != S_UDT) {
+    return nullptr;
+  }
+
+  // taken largely from PdbAstBuilder::GetOrCreateSymbolForId
+  UDTSym udt(SymbolRecordKind::UDTSym);
+  llvm::cantFail(SymbolDeserializer::deserializeAs(cvs, udt));
+
+  auto inner_type = ParseTypeFromPDB(udt.Type);
+  // TODO leak
+  auto* rt = new RustType{RustType::NewTypedef(
+      ConstString(udt.Name),
+      inner_type->GetFullCompilerType()
+  )};
+
+  auto compiler_type = CompilerType(weak_from_this(), rt);
+
+  auto type_sp = GetSymbolFile()->MakeType(
+      toOpaqueUid(symbol),
+      rt->m_name,
+      rt->m_size,
+      nullptr,
+      inner_type->GetID(),
+      Type::eEncodingIsTypedefUID,
+      Declaration(),
+      compiler_type,
+      Type::ResolveState::Full
+  );
+}
+
+// TODO
+ConstString
+TypeSystemRust::ConstructDemangledNameFromPDB(const npdb::PdbSymUid& symbol) {
+  return ConstString();
+}
+
+// TODO probably not necessary since SymbolFileNativePDB takes care of this
+Function* TypeSystemRust::ParseFunctionFromPDB(npdb::PdbCompilandSymId func_id
+) {
+  return nullptr;
+}
+
+// TODO
+bool TypeSystemRust::CompleteTypeFromPDB(
+    const npdb::PdbTypeSymId symbol,
+    Type* type,
+    CompilerType& compiler_type
+) {
+  return true;
+}
+
+// TODO
+CompilerDecl TypeSystemRust::GetDeclForUIDFromPDB(const npdb::PdbSymUid& symbol
+) {
+  // TODO check cache
+
+  SymbolFileNativePDB* pdb =
+      static_cast<SymbolFileNativePDB*>(GetSymbolFile()->GetBackingSymbolFile()
+      );
+  PdbIndex& index = pdb->GetIndex();
+
+  switch (symbol.kind()) {
+    // taken largely from PdbAstBuilder::GetOrCreateSymbolForId
+  case PdbSymUidKind::CompilandSym: {
+    CVSymbol cvs = index.ReadSymbolRecord(symbol.asCompilandSym());
+    // if (cvs.kind() == S_REGISTER) {
+    //   clang::DeclContext* scope = GetParentDeclContext(id);
+    //   if (!scope)
+    //     return nullptr;
+    //   clang::Decl* scope_decl = clang::Decl::castFromDeclContext(scope);
+    //   PdbCompilandSymId scope_id =
+    //       PdbSymUid(m_decl_to_status[scope_decl].uid).asCompilandSym();
+    //   return GetOrCreateVariableDecl(scope_id, id);
+    // }
+
+    switch (cvs.kind()) {
+      // local variables
+    case S_REGISTER:
+    case S_REGREL32:
+    case S_LOCAL: {
+      CompilerDeclContext scope = GetDeclContextContainingUIDFromPDB(symbol);
+      if (!scope) {
+        return CompilerDecl();
+      }
+
+      RustDecl* decl_context =
+          static_cast<RustDecl*>(scope.GetOpaqueDeclContext());
+
+      if (!decl_context) {
+        return CompilerDecl();
+      }
+
+      CVSymbol cvs = index.ReadSymbolRecord(symbol.asCompilandSym());
+
+      VariableInfo var_info = GetVariableNameInfo(cvs);
+      TypeSP var_type = ParseTypeFromPDB(var_info.type);
+
+      auto* var_decl = new RustDecl(
+          ConstString(var_info.name),
+          ConstString(),
+          decl_context,
+          VarDecl{var_type->GetFullCompilerType()}
+      );
+
+      decl_context->AddItem(var_decl);
+
+      return CompilerDecl(this, var_decl);
+    } break;
+    // functions
+    case S_GPROC32:
+    case S_LPROC32: {
+      CompilerDeclContext scope = GetDeclContextContainingUIDFromPDB(symbol);
+      if (!scope) {
+        return CompilerDecl();
+      }
+
+      RustDecl* decl_context =
+          static_cast<RustDecl*>(scope.GetOpaqueDeclContext());
+
+      auto context_name = decl_context->QualifiedName();
+
+      CVSymbol cvs = index.ReadSymbolRecord(symbol.asCompilandSym());
+
+      ProcSym func(static_cast<SymbolRecordKind>(cvs.kind()));
+      llvm::cantFail(SymbolDeserializer::deserializeAs<ProcSym>(cvs, func));
+
+      TypeSP func_type = ParseTypeFromPDB(func.FunctionType);
+
+      if (!func_type) {
+        return CompilerDecl();
+      }
+
+      llvm::StringRef func_name = func.Name;
+      func_name.consume_front(context_name);
+      func_name.consume_front("::");
+
+      // there's a bunch of processing in PdbAstBuilder::CreateFunctionDecl
+      // that essentially processes member functions. Luckily for us, Rust
+      // (afaik) doesn't output member functions at all and we don't bother
+      // storing them in RustType, so we can ignore all of that
+
+      auto* new_decl = new RustDecl(
+          ConstString(func_name),
+          ConstString(),
+          decl_context,
+          FnDecl{llvm::DenseMap<ConstString, RustDecl*>(), CompilerType()}
+          // TODO We can probably find the type?
+      );
+
+      decl_context->AddItem(new_decl);
+      return CompilerDecl(this, new_decl);
+    } break;
+
+    // global variables
+    case S_GDATA32:
+    case S_LDATA32:
+    case S_GTHREAD32:
+    case S_CONSTANT:
+      return CompilerDecl();
+    // block scopes
+    case S_BLOCK32:
+
+      // inlined functions
+    case S_INLINESITE:
+      // TODO
+
+    default:
+      return CompilerDecl();
+    }
+
+  } break;
+  case PdbSymUidKind::Compiland:
+  case PdbSymUidKind::PublicSym:
+  case PdbSymUidKind::GlobalSym:
+  case PdbSymUidKind::Type:
+  case PdbSymUidKind::FieldListMember:
+    break;
+  }
+  return CompilerDecl();
+}
+
+// TODO from GetOrCreateDeclContextForUid
+CompilerDeclContext
+TypeSystemRust::GetDeclContextForUIDFromPDB(const npdb::PdbSymUid& symbol) {
+  if (symbol.kind() == PdbSymUidKind::CompilandSym) {
+    if (symbol.asCompilandSym().offset == 0)
+      // TODO this might be wrong
+      return CompilerDeclContext(this, m_compile_unit_ctx.get());
+  }
+
+  auto decl = GetDeclForUIDFromPDB(symbol);
+
+  if (!decl) {
+    return CompilerDeclContext();
+  }
+
+  auto* rust_decl = static_cast<RustDecl*>(decl.GetOpaqueDecl());
+
+  if (rust_decl->IsContext()) {
+    return CompilerDeclContext(this, rust_decl);
+  }
+
+  return CompilerDeclContext();
+}
+
+// TODO probably matches GetParentDeclContext?`
+CompilerDeclContext
+TypeSystemRust::GetDeclContextContainingUIDFromPDB(const npdb::PdbSymUid& symbol
+) {
+  // Taken directly from PdbAstBuilder::GetParentDeclContext
+
+  SymbolFileNativePDB* pdb =
+      static_cast<SymbolFileNativePDB*>(GetSymbolFile()->GetBackingSymbolFile()
+      );
+  PdbIndex& index = pdb->GetIndex();
+
+  auto kind = symbol.kind();
+  switch (kind) {
+  case PdbSymUidKind::CompilandSym: {
+    std::optional<PdbCompilandSymId> scope =
+        pdb->FindSymbolScope(symbol.asCompilandSym());
+    if (scope)
+      return GetDeclContextForUIDFromPDB(*scope);
+
+    // TODO
+    CVSymbol sym = index.ReadSymbolRecord(symbol.asCompilandSym());
+    // return CreateDeclInfoForUndecoratedName(getSymbolName(sym)).first;
+  } break;
+  case PdbSymUidKind::Type: {
+    // It could be a namespace, class, or global.  We don't support nested
+    // functions yet.  Anyway, we just need to consult the parent type map.
+    PdbTypeSymId type_id = symbol.asTypeSym();
+    std::optional<TypeIndex> parent_index = pdb->GetParentType(type_id.index);
+    if (!parent_index)
+      return CompilerDeclContext(this, m_compile_unit_ctx.get());
+    return GetDeclContextForUIDFromPDB(PdbTypeSymId(*parent_index));
+  } break;
+  case PdbSymUidKind::FieldListMember:
+    // In this case the parent DeclContext is the one for the class that
+    // this member is inside of.
+    break;
+  case PdbSymUidKind::GlobalSym: {
+    // If this refers to a compiland symbol, just recurse in with that
+    // symbol. The only other possibilities are S_CONSTANT and S_UDT, in
+    // which case we need to parse the undecorated name to figure out the
+    // scope, then look that up in the TPI stream.  If it's found, it's a
+    // type, othewrise it's a series of namespaces.
+    // FIXME: do this.
+    CVSymbol global = index.ReadSymbolRecord(symbol.asGlobalSym());
+    switch (global.kind()) {
+    case SymbolKind::S_GDATA32:
+    case SymbolKind::S_LDATA32:
+      // TODO
+      // return
+      // CreateDeclInfoForUndecoratedName(getSymbolName(global)).first;
+    case SymbolKind::S_PROCREF:
+    case SymbolKind::S_LPROCREF: {
+      ProcRefSym ref{global.kind()};
+      llvm::cantFail(SymbolDeserializer::deserializeAs<ProcRefSym>(global, ref)
+      );
+      PdbCompilandSymId cu_sym_id{ref.modi(), ref.SymOffset};
+      return GetDeclContextContainingUIDFromPDB(cu_sym_id);
+    }
+    case SymbolKind::S_CONSTANT:
+    case SymbolKind::S_UDT:
+    // TODO
+    // return CreateDeclInfoForUndecoratedName(getSymbolName(global)).first;
+    default:
+      break;
+    }
+  } break;
+  default:
+    break;
+  }
+
+  return CompilerDeclContext(this, m_compile_unit_ctx.get());
+}
+
+void TypeSystemRust::EnsureAllSymbolsInDeclContextHaveBeenParsed(
+    CompilerDeclContext decl_context
+) {
+  // Taken from PdbAstBuilder::ParseDeclsForContext
+  // return;
+  auto* context = static_cast<RustDecl*>(decl_context.GetOpaqueDeclContext());
+
+  if (!context) {
+    return;
+  }
+
+  if (context->IsCompUnit()) {
+    llvm::call_once(m_parse_all_types, [this]() {
+      SymbolFileNativePDB* pdb = static_cast<SymbolFileNativePDB*>(
+          GetSymbolFile()->GetBackingSymbolFile()
+      );
+      PdbIndex& index = pdb->GetIndex();
+      TypeIndex ti{index.tpi().TypeIndexBegin()};
+      for (const CVType& cvt : index.tpi().typeArray()) {
+        PdbTypeSymId tid{ti};
+        ++ti;
+
+        if (!IsTagRecord(cvt))
+          continue;
+
+        ParseTypeFromPDB(tid);
+      }
+    });
+    llvm::call_once(m_parse_functions_and_non_local_vars, [this]() {
+      SymbolFileNativePDB* pdb = static_cast<SymbolFileNativePDB*>(
+          GetSymbolFile()->GetBackingSymbolFile()
+      );
+      PdbIndex& index = pdb->GetIndex();
+      uint32_t module_count = index.dbi().modules().getModuleCount();
+      for (uint16_t modi = 0; modi < module_count; ++modi) {
+        CompilandIndexItem& cii = index.compilands().GetOrCreateCompiland(modi);
+        const CVSymbolArray& symbols = cii.m_debug_stream.getSymbolArray();
+        auto iter = symbols.begin();
+        while (iter != symbols.end()) {
+          PdbCompilandSymId sym_id{modi, iter.offset()};
+
+          switch (iter->kind()) {
+          case S_GPROC32:
+          case S_LPROC32:
+            CreateFunctionDecl(sym_id);
+            iter = symbols.at(getScopeEndOffset(*iter));
+            break;
+          case S_GDATA32:
+          case S_GTHREAD32:
+          case S_LDATA32:
+          case S_LTHREAD32:
+            CreateVariableDecl(PdbCompilandSymId(modi, 0), sym_id);
+            ++iter;
+            break;
+          // default:
+          //   ++iter;
+          //   continue;
+          case S_COMPILE:
+          case S_REGISTER_16t:
+          case S_CONSTANT_16t:
+          case S_UDT_16t:
+          case S_SSEARCH:
+          case S_SKIP:
+          case S_CVRESERVE:
+          case S_OBJNAME_ST:
+          case S_ENDARG:
+          case S_COBOLUDT_16t:
+          case S_MANYREG_16t:
+          case S_RETURN:
+          case S_ENTRYTHIS:
+          case S_BPREL16:
+          case S_LDATA16:
+          case S_GDATA16:
+          case S_PUB16:
+          case S_LPROC16:
+          case S_GPROC16:
+          case S_THUNK16:
+          case S_BLOCK16:
+          case S_WITH16:
+          case S_LABEL16:
+          case S_CEXMODEL16:
+          case S_VFTABLE16:
+          case S_REGREL16:
+          case S_BPREL32_16t:
+          case S_LDATA32_16t:
+          case S_GDATA32_16t:
+          case S_PUB32_16t:
+          case S_LPROC32_16t:
+          case S_GPROC32_16t:
+          case S_THUNK32_ST:
+          case S_BLOCK32_ST:
+          case S_WITH32_ST:
+          case S_LABEL32_ST:
+          case S_CEXMODEL32:
+          case S_VFTABLE32_16t:
+          case S_REGREL32_16t:
+          case S_LTHREAD32_16t:
+          case S_GTHREAD32_16t:
+          case S_SLINK32:
+          case S_LPROCMIPS_16t:
+          case S_GPROCMIPS_16t:
+          case S_PROCREF_ST:
+          case S_DATAREF_ST:
+          case S_ALIGN:
+          case S_LPROCREF_ST:
+          case S_OEM:
+          case S_TI16_MAX:
+          case S_REGISTER_ST:
+          case S_CONSTANT_ST:
+          case S_UDT_ST:
+          case S_COBOLUDT_ST:
+          case S_MANYREG_ST:
+          case S_BPREL32_ST:
+          case S_LDATA32_ST:
+          case S_GDATA32_ST:
+          case S_PUB32_ST:
+          case S_LPROC32_ST:
+          case S_GPROC32_ST:
+          case S_VFTABLE32:
+          case S_REGREL32_ST:
+          case S_LTHREAD32_ST:
+          case S_GTHREAD32_ST:
+          case S_LPROCMIPS_ST:
+          case S_GPROCMIPS_ST:
+          case S_COMPILE2_ST:
+          case S_MANYREG2_ST:
+          case S_LPROCIA64_ST:
+          case S_GPROCIA64_ST:
+          case S_LOCALSLOT_ST:
+          case S_PARAMSLOT_ST:
+          case S_GMANPROC_ST:
+          case S_LMANPROC_ST:
+          case S_RESERVED1:
+          case S_RESERVED2:
+          case S_RESERVED3:
+          case S_RESERVED4:
+          case S_LMANDATA_ST:
+          case S_GMANDATA_ST:
+          case S_MANFRAMEREL_ST:
+          case S_MANREGISTER_ST:
+          case S_MANSLOT_ST:
+          case S_MANMANYREG_ST:
+          case S_MANREGREL_ST:
+          case S_MANMANYREG2_ST:
+          case S_MANTYPREF:
+          case S_UNAMESPACE_ST:
+          case S_ST_MAX:
+          case S_WITH32:
+          case S_MANYREG:
+          case S_LPROCMIPS:
+          case S_GPROCMIPS:
+          case S_MANYREG2:
+          case S_LPROCIA64:
+          case S_GPROCIA64:
+          case S_LOCALSLOT:
+          case S_PARAMSLOT:
+          case S_MANFRAMEREL:
+          case S_MANREGISTER:
+          case S_MANSLOT:
+          case S_MANMANYREG:
+          case S_MANREGREL:
+          case S_MANMANYREG2:
+          case S_DATAREF:
+          case S_ANNOTATIONREF:
+          case S_TOKENREF:
+          case S_GMANPROC:
+          case S_LMANPROC:
+          case S_ATTR_FRAMEREL:
+          case S_ATTR_REGISTER:
+          case S_ATTR_REGREL:
+          case S_ATTR_MANYREG:
+          case S_SEPCODE:
+          case S_LOCAL_2005:
+          case S_DEFRANGE_2005:
+          case S_DEFRANGE2_2005:
+          case S_DISCARDED:
+          case S_LPROCMIPS_ID:
+          case S_GPROCMIPS_ID:
+          case S_LPROCIA64_ID:
+          case S_GPROCIA64_ID:
+          case S_DEFRANGE_HLSL:
+          case S_GDATA_HLSL:
+          case S_LDATA_HLSL:
+          case S_LOCAL_DPC_GROUPSHARED:
+          case S_DEFRANGE_DPC_PTR_TAG:
+          case S_DPC_SYM_TAG_MAP:
+          case S_POGODATA:
+          case S_INLINESITE2:
+          case S_MOD_TYPEREF:
+          case S_REF_MINIPDB:
+          case S_PDBMAP:
+          case S_GDATA_HLSL32:
+          case S_LDATA_HLSL32:
+          case S_GDATA_HLSL32_EX:
+          case S_LDATA_HLSL32_EX:
+          case S_FASTLINK:
+          case S_INLINEES:
+          case S_END:
+          case S_INLINESITE_END:
+          case S_PROC_ID_END:
+          case S_THUNK32:
+          case S_TRAMPOLINE:
+          case S_SECTION:
+          case S_COFFGROUP:
+          case S_EXPORT:
+          case S_LPROC32_ID:
+          case S_GPROC32_ID:
+          case S_LPROC32_DPC:
+          case S_LPROC32_DPC_ID:
+          case S_REGISTER:
+          case S_PUB32:
+          case S_PROCREF:
+          case S_LPROCREF:
+          case S_ENVBLOCK:
+          case S_INLINESITE:
+          case S_LOCAL:
+          case S_DEFRANGE:
+          case S_DEFRANGE_SUBFIELD:
+          case S_DEFRANGE_REGISTER:
+          case S_DEFRANGE_FRAMEPOINTER_REL:
+          case S_DEFRANGE_SUBFIELD_REGISTER:
+          case S_DEFRANGE_FRAMEPOINTER_REL_FULL_SCOPE:
+          case S_DEFRANGE_REGISTER_REL:
+          case S_BLOCK32:
+          case S_LABEL32:
+          case S_OBJNAME:
+          case S_COMPILE2:
+          case S_COMPILE3:
+          case S_FRAMEPROC:
+          case S_CALLSITEINFO:
+          case S_FILESTATIC:
+          case S_HEAPALLOCSITE:
+          case S_FRAMECOOKIE:
+          case S_ARMSWITCHTABLE:
+          case S_CALLEES:
+          case S_CALLERS:
+          case S_UDT:
+          case S_COBOLUDT:
+          case S_BUILDINFO:
+          case S_BPREL32:
+          case S_REGREL32:
+          case S_CONSTANT:
+          case S_MANCONSTANT:
+          case S_LMANDATA:
+          case S_GMANDATA:
+          case S_UNAMESPACE:
+          case S_ANNOTATION:
+            break;
+          }
+        }
+      }
+    });
+    return;
+  }
+
+  if (context->IsNamespace()) {
+    // TODO
+    // ParseNamespace(context);
+    return;
+  }
+
+  // We don't need to resolve types any further here since we don't do
+  // partial type completion.
+
+  if (context->IsFn() || context->IsBlock()) {
+    if (auto search = m_decl_ctx_to_uid.find(decl_context);
+        search != m_decl_ctx_to_uid.end()) {
+      PdbCompilandSymId block_id = PdbSymUid(search->second).asCompilandSym();
+      ParseBlockChildren(block_id);
+    }
+
+    return;
+  }
+}
+
+// TODO
+std::string
+TypeSystemRust::GetPDBClassTemplateParams(const npdb::PdbTypeSymId& type) {
+  return {};
+}
+
+RustDecl* TypeSystemRust::CreateFunctionDecl(PdbCompilandSymId symbol) {
+  if (m_uid_to_decl.contains(toOpaqueUid(symbol))) {
+    return m_uid_to_decl[toOpaqueUid(symbol)];
+  }
+
+  SymbolFileNativePDB* pdb =
+      static_cast<SymbolFileNativePDB*>(GetSymbolFile()->GetBackingSymbolFile()
+      );
+  PdbIndex& index = pdb->GetIndex();
+
+  CompilerDeclContext scope = GetDeclContextContainingUIDFromPDB(symbol);
+  if (!scope) {
+    return nullptr;
+  }
+
+  RustDecl* decl_context = static_cast<RustDecl*>(scope.GetOpaqueDeclContext());
+
+  auto context_name = decl_context->QualifiedName();
+
+  CVSymbol cvs = index.ReadSymbolRecord(symbol);
+
+  ProcSym func(static_cast<SymbolRecordKind>(cvs.kind()));
+  llvm::cantFail(SymbolDeserializer::deserializeAs<ProcSym>(cvs, func));
+
+  TypeSP func_type = ParseTypeFromPDB(func.FunctionType);
+
+  if (!func_type) {
+    return nullptr;
+  }
+
+  llvm::StringRef func_name = func.Name;
+  func_name.consume_front(context_name);
+  func_name.consume_front("::");
+
+  // there's a bunch of processing in PdbAstBuilder::CreateFunctionDecl that
+  // essentially processes member functions. Luckily for us, Rust (afaik)
+  // doesn't output member functions at all and we don't bother storing them
+  // in RustType, so we can ignore all of that
+
+  auto* new_decl = new RustDecl(
+      ConstString(func_name),
+      ConstString(),
+      decl_context,
+      FnDecl{llvm::DenseMap<ConstString, RustDecl*>(), CompilerType()}
+      // TODO We can probably find the type?
+  );
+
+  m_uid_to_decl[toOpaqueUid(symbol)] = new_decl;
+  decl_context->AddItem(new_decl);
+  return new_decl;
+}
+
+RustDecl* TypeSystemRust::CreateVariableDecl(
+    PdbCompilandSymId scope_id,
+    PdbCompilandSymId var_id
+) {
+  if (m_uid_to_decl.contains(toOpaqueUid(var_id))) {
+    return m_uid_to_decl[toOpaqueUid(var_id)];
+  }
+
+  CompilerDeclContext scope = GetDeclContextForUIDFromPDB(scope_id);
+  if (!scope)
+    return nullptr;
+
+  SymbolFileNativePDB* pdb =
+      static_cast<SymbolFileNativePDB*>(GetSymbolFile()->GetBackingSymbolFile()
+      );
+  PdbIndex& index = pdb->GetIndex();
+  CVSymbol sym = index.ReadSymbolRecord(var_id);
+
+  VariableInfo var_info = GetVariableNameInfo(sym);
+
+  TypeSP var_type = ParseTypeFromPDB(var_info.type);
+  if (!var_type) {
+    return nullptr;
+  }
+
+  // TODO leak
+  RustDecl* var_decl = new RustDecl(
+      ConstString(var_info.name),
+      ConstString(),
+      static_cast<RustDecl*>(scope.GetOpaqueDeclContext()),
+      {VarDecl{var_type->GetFullCompilerType()}}
+  );
+
+  m_uid_to_decl[toOpaqueUid(var_id)] = var_decl;
+
+  return var_decl;
+}
+
+void TypeSystemRust::ParseBlockChildren(PdbCompilandSymId block_id) {
+  SymbolFileNativePDB* pdb =
+      static_cast<SymbolFileNativePDB*>(GetSymbolFile()->GetBackingSymbolFile()
+      );
+
+  PdbIndex& index = pdb->GetIndex();
+  CVSymbol sym = index.ReadSymbolRecord(block_id);
+  lldbassert(
+      sym.kind() == S_GPROC32 || sym.kind() == S_LPROC32 ||
+      sym.kind() == S_BLOCK32 || sym.kind() == S_INLINESITE
+  );
+  CompilandIndexItem& cii =
+      index.compilands().GetOrCreateCompiland(block_id.modi);
+  CVSymbolArray symbols =
+      cii.m_debug_stream.getSymbolArrayForScope(block_id.offset);
+
+  // Function parameters should already have been created when the function
+  // was parsed.
+  if (sym.kind() == S_GPROC32 || sym.kind() == S_LPROC32) {
+    auto* decl = m_uid_to_decl[toOpaqueUid(block_id)];
+    if (auto* fn_decl = decl->AsFn()) {
+      auto params = fn_decl->type.GetFunctionArgumentCount();
+      if (params != 0) {
+        while (!symbols.empty()) {
+          if (params == 0) {
+            break;
+          }
+
+          CVSymbol sym = *symbols.begin();
+          symbols.drop_front();
+
+          switch (sym.kind()) {
+          case S_REGISTER:
+          case S_REGREL32:
+          case S_LOCAL:
+            continue;
+          default:
+            --params;
+          }
+        }
+      }
+    }
+  }
+
+  symbols.drop_front();
+  auto begin = symbols.begin();
+  while (begin != symbols.end()) {
+    PdbCompilandSymId child_sym_id(block_id.modi, begin.offset());
+    GetDeclForUIDFromPDB(child_sym_id);
+    if (begin->kind() == S_BLOCK32 || begin->kind() == S_INLINESITE) {
+      ParseBlockChildren(child_sym_id);
+      begin = symbols.at(getScopeEndOffset(*begin));
+    }
+    ++begin;
+  }
+}
+
+enum class NameKind {
+  Bare,
+  Enum,
+  Ref,
+  RefMut,
+  PtrConst,
+  PtrMut,
+  Tuple,
+  Slice,
+  Never,
+  Pat,
+  Dyn,
+  Assoc,
+  RecursiveType,
+  Impl,
+  VTable,
+  VTableType,
+};
+
+ConstString TypeSystemRust::NormalizeMSVCTypeName(llvm::StringRef name) {
+  if (name.empty()) {
+    return ConstString();
+  }
+
+  if (msvc_normalization_cache.contains(name)) {
+    return msvc_normalization_cache[name];
+  }
+
+  auto original = name.substr(0);
+
+  NameKind kind = NameKind::Bare;
+  if (name.starts_with("enum2$<")) {
+    // we skip processing sum-type's nested types (e.g.
+    // enum2$<sample::Number>::NAMES) because it makes finding them in the
+    // symbol table annoying
+    if (!name.ends_with('>')) {
+      return ConstString(name);
+    }
+    kind = NameKind::Enum;
+    name = name.substr(7);
+    name.consume_back(">");
+  } else if (name.starts_with("ref$<")) {
+    kind = NameKind::Ref;
+    name = name.substr(5);
+    name.consume_back(">");
+  } else if (name.starts_with("ref_mut$<")) {
+    kind = NameKind::RefMut;
+    name = name.substr(9);
+    name.consume_back(">");
+  } else if (name.starts_with("ptr_const$<")) {
+    kind = NameKind::PtrConst;
+    name = name.substr(11);
+    name.consume_back(">");
+  } else if (name.starts_with("ptr_mut$<")) {
+    kind = NameKind::PtrMut;
+    name = name.substr(9);
+    name.consume_back(">");
+  } else if (name.starts_with("tuple$<")) {
+    kind = NameKind::Tuple;
+    // intentionally leave the `<` so that we can process the generics the same
+    // as the other types
+    name = name.substr(6);
+  } else if (name.starts_with("slice2$<")) {
+    kind = NameKind::Slice;
+    name = name.substr(8);
+    name.consume_back(">");
+  }
+
+  name = name.trim();
+
+  // if (kind != NameKind::Bare) {
+  //   if (name.ends_with(" >")) {
+  //     name = name.substr(0, name.size() - 2);
+  //   } else if (name.ends_with(">")) {
+  //     name = name.substr(0, name.size() - 1);
+  //   }
+  // }
+  if (kind != NameKind::Bare) {
+    name = NormalizeMSVCTypeName(name);
+  }
+
+  auto [base_name, args] = GetTemplateArgs(name);
+
+  std::string normalized = "";
+
+  switch (kind) {
+  case NameKind::Ref:
+    normalized.push_back('&');
+    break;
+  case NameKind::RefMut:
+    normalized.append("&mut ");
+    break;
+  case NameKind::PtrConst:
+    normalized.append("*const ");
+    break;
+  case NameKind::PtrMut:
+    normalized.append("*mut ");
+    break;
+  case NameKind::Slice:
+    normalized.append("[");
+    break;
+  default:
+    break;
+  }
+
+  normalized.append(base_name.trim());
+
+  if (!args.empty() || kind == NameKind::Tuple) {
+    switch (kind) {
+    case NameKind::Tuple:
+      normalized.push_back('(');
+      break;
+    default:
+      normalized.push_back('<');
+      break;
+    }
+
+    for (auto arg : args) {
+      normalized.append(NormalizeMSVCTypeName(arg).GetStringRef());
+      normalized.push_back(',');
+    }
+    // remove trailing ','
+    if (!args.empty()) {
+      normalized.pop_back();
+    }
+
+    switch (kind) {
+    case NameKind::Tuple:
+      normalized.push_back(')');
+      break;
+    case NameKind::Slice:
+      normalized.push_back(']');
+      break;
+    default:
+      normalized.push_back('>');
+      break;
+    }
+  }
+
+  switch (kind) {
+  case NameKind::Slice:
+    normalized.push_back(']');
+    break;
+  default:
+    break;
+  }
+
+  if (!normalized.empty() && normalized.back() == '$') {
+    normalized.pop_back();
+  }
+
+  auto result = ConstString(normalized);
+
+  // printf("Raw: %s | ", temp.c_str());
+  // printf("Normalized: %s\n", result.AsCString());
+  msvc_normalization_cache[original] = result;
+
+  return result;
+}
+
 } // namespace lldb_private

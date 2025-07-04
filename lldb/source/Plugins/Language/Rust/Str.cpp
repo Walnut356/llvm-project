@@ -12,7 +12,7 @@
 #include "lldb/Utility/ConstString.h"
 #include "lldb/lldb-enumerations.h"
 #include "lldb/lldb-forward.h"
-#include <optional>
+#include "Utils.h"
 
 using namespace lldb;
 using namespace lldb_private;
@@ -37,9 +37,20 @@ public:
 
   size_t GetIndexOfChildWithName(ConstString name) override;
 
+  static TypeSummaryImplSP summary;
   ValueObject* data_ptr;
   uint64_t len;
 };
+
+TypeSummaryImplSP StrSyntheticFrontEnd::summary =
+    CXXFunctionSummaryFormat::SharedPointer(new CXXFunctionSummaryFormat(
+        TypeSummaryImpl::Flags()
+            .SetCascades()
+            .SetSkipPointers(false)
+            .SetSkipReferences(false),
+        PrintableByteSummary,
+        "summary for u8's that should be treated as characters"
+    ));
 
 StrSyntheticFrontEnd::StrSyntheticFrontEnd(ValueObjectSP valobj_sp)
     : SyntheticChildrenFrontEnd(*valobj_sp) {
@@ -97,7 +108,7 @@ static SyntheticChildrenFrontEnd* RustStrSyntheticFrontEndCreator(
   return new StrSyntheticFrontEnd(valobj_sp);
 }
 
-bool RustStrSummary(
+static bool RustStrSummary(
     ValueObject& valobj,
     Stream& stream,
     const TypeSummaryOptions& summary_options

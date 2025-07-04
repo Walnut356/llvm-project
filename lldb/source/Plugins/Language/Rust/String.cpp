@@ -6,10 +6,10 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "RustLanguage.h"
+#include "Utils.h"
 #include "lldb/Core/ValueObject.h"
+#include "lldb/Core/ValueObjectSyntheticFilter.h"
 #include "lldb/DataFormatters/FormattersHelpers.h"
-#include "lldb/DataFormatters/StringPrinter.h"
 #include "lldb/DataFormatters/TypeSynthetic.h"
 #include "lldb/Utility/ConstString.h"
 #include "lldb/lldb-enumerations.h"
@@ -20,58 +20,20 @@ using namespace lldb;
 using namespace lldb_private;
 using namespace lldb_private::formatters;
 
-bool PrintableByteSummary(
-    ValueObject& valobj,
-    Stream& stream,
-    const TypeSummaryOptions& summary_options
-) {
-  uint64_t value = valobj.GetValueAsUnsigned(0);
-  switch (value) {
-  case '\n':
-    stream.PutCString("'\\n'");
-    break;
-  case '\r':
-    stream.PutCString("'\\r'");
-    break;
-  case '\t':
-    stream.PutCString("'\\t'");
-    break;
-  case '\\':
-    stream.PutCString("'\\\\'");
-    break;
-  case '\0':
-    stream.PutCString("'\\0'");
-    break;
-  case '\'':
-    stream.PutCString("'\\''");
-    break;
-
-  default:
-    if (value < 128 && isprint(value)) {
-      stream.Printf("'%c'", char(value));
-    } else {
-      stream.Printf("'\\u{%x}'", unsigned(value));
-    }
-    break;
-  }
-
-  return true;
-}
-
 namespace lldb_private {
 namespace formatters {
 
-// String is just a wrapper around a Vec, so most of its functionality will
-// delegate directly to the internal vec
+// String is just a wrapper around a Vec. While it could just delegate to the
+// internal `Vec`, that's significantly slower than just replicating the vec's
+// behavior here. For any other type I wouldn't care, but strings are so common
+// that speed is extremely important
 class StringSyntheticFrontEnd : public SyntheticChildrenFrontEnd {
 public:
   StringSyntheticFrontEnd(ValueObjectSP valobj_sp);
 
   ConstString GetSyntheticTypeName() override { return ConstString("String"); };
 
-  llvm::Expected<uint32_t> CalculateNumChildren() override {
-    return inner_vec->GetNumChildrenIgnoringErrors();
-  };
+  llvm::Expected<uint32_t> CalculateNumChildren() override { return len; };
 
   ValueObjectSP GetChildAtIndex(uint32_t idx) override;
 
@@ -81,21 +43,27 @@ public:
 
   size_t GetIndexOfChildWithName(ConstString name) override;
 
-  ValueObject* inner_vec;
-  TypeSummaryImplSP summary;
+  static TypeSummaryImplSP summary;
+
+  ValueObject* inner_vec = nullptr;
+  ValueObject* data_ptr = nullptr;
+  std::vector<uint8_t> buffer = {};
+  uint64_t len;
+  CompilerType element_type;
 };
+
+TypeSummaryImplSP StringSyntheticFrontEnd::summary =
+    CXXFunctionSummaryFormat::SharedPointer(new CXXFunctionSummaryFormat(
+        TypeSummaryImpl::Flags()
+            .SetCascades()
+            .SetSkipPointers(false)
+            .SetSkipReferences(false),
+        PrintableByteSummary,
+        "summary for u8's that should be treated as characters"
+    ));
 
 StringSyntheticFrontEnd::StringSyntheticFrontEnd(ValueObjectSP valobj_sp)
     : SyntheticChildrenFrontEnd(*valobj_sp) {
-  summary =
-      CXXFunctionSummaryFormat::SharedPointer(new CXXFunctionSummaryFormat(
-          TypeSummaryImpl::Flags()
-              .SetCascades()
-              .SetSkipPointers(false)
-              .SetSkipReferences(false),
-          PrintableByteSummary,
-          "summary for u8's that should be treated as characters"
-      ));
   if (valobj_sp) {
     Update();
   }
@@ -103,27 +71,71 @@ StringSyntheticFrontEnd::StringSyntheticFrontEnd(ValueObjectSP valobj_sp)
 
 ChildCacheState StringSyntheticFrontEnd::Update() {
   inner_vec =
-      m_backend.GetChildMemberWithName("vec")->GetSyntheticValue().get();
+      m_backend.GetChildMemberWithName("vec")->GetNonSyntheticValue().get();
+
+  len = inner_vec->GetChildMemberWithName("len")->GetValueAsUnsigned(0);
+  // should always be `u8`
+  element_type = inner_vec->GetCompilerType().GetTypeTemplateArgument(0);
+  // element size is always 1 so we don't need to bother with that
+
+  data_ptr = inner_vec->GetChildMemberWithName("buf")
+                 ->GetChildMemberWithName("inner")
+                 ->GetChildMemberWithName("ptr")
+                 ->GetChildMemberWithName("pointer")
+                 ->GetChildMemberWithName("pointer")
+                 .get();
+
+  if (len > 0) {
+    buffer.resize(len);
+    auto process = data_ptr->GetProcessSP();
+
+    Status err = Status();
+    process->ReadMemory(data_ptr->GetPointerValue(), buffer.data(), len, err);
+  }
+
   return ChildCacheState::eRefetch;
 }
 
 ValueObjectSP StringSyntheticFrontEnd::GetChildAtIndex(uint32_t idx) {
-  auto child = inner_vec->GetChildAtIndex(idx);
-  if (!child) {
-    return child;
+  if (!data_ptr || !element_type || idx > buffer.size()) {
+    return ValueObjectSP();
   }
+
+  StreamString name;
+  name.Printf("[%" PRIu64 "]", (uint64_t)idx);
+
+  DataExtractor d = DataExtractor(
+      &buffer[idx],
+      1,
+      lldb::eByteOrderLittle,
+      data_ptr->GetByteSize().value_or(8)
+  );
+
+  auto child = CreateValueObjectFromData(
+      name.GetString(),
+      d,
+      m_backend.GetExecutionContextRef(),
+      element_type
+  );
+
   child->SetFormat(eFormatCharPrintable);
 
-  child->SetSummaryFormat(summary);
+  child->SetSummaryFormat(StringSyntheticFrontEnd::summary);
 
   return child;
 }
 
 size_t StringSyntheticFrontEnd::GetIndexOfChildWithName(ConstString name) {
-  return inner_vec->GetIndexOfChildWithName(name);
+  if (!data_ptr) {
+    return UINT32_MAX;
+  }
+
+  auto idx = ExtractIndexFromString(name.GetCString());
+
+  return idx;
 }
 
-SyntheticChildrenFrontEnd* RustStringSyntheticFrontEndCreator(
+static SyntheticChildrenFrontEnd* RustStringSyntheticFrontEndCreator(
     CXXSyntheticChildren*,
     lldb::ValueObjectSP valobj_sp
 ) {
@@ -135,7 +147,7 @@ SyntheticChildrenFrontEnd* RustStringSyntheticFrontEndCreator(
   return new StringSyntheticFrontEnd(valobj_sp);
 }
 
-bool RustStringSummary(
+static bool RustStringSummary(
     ValueObject& valobj,
     Stream& stream,
     const TypeSummaryOptions& summary_options
@@ -148,7 +160,12 @@ bool RustStringSummary(
 
   stream.PutChar('"');
   for (unsigned int i = 0; i < size; ++i) {
-    stream.PutChar(valobj.GetChildAtIndex(i)->GetValueAsUnsigned(0));
+    auto child = valobj.GetChildAtIndex(i);
+    if (child) {
+      stream.PutChar(child->GetValueAsUnsigned(0));
+    } else {
+      stream.PutCString("<?>");
+    }
   }
   stream.PutChar('"');
 

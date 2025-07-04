@@ -87,7 +87,7 @@ ChildCacheState VecSyntheticFrontEnd::Update() {
 }
 
 ValueObjectSP VecSyntheticFrontEnd::GetChildAtIndex(uint32_t idx) {
-  if (!data_ptr || idx > len) {
+  if (!data_ptr || !element_type || idx > len) {
     return ValueObjectSP();
   }
 

@@ -307,7 +307,7 @@ enum class PDB_LocType {
 
 /// These values correspond to the UdtKind enumeration, and are documented
 /// here: https://msdn.microsoft.com/en-us/library/wcstk66t.aspx
-enum class PDB_UdtType { Struct, Class, Union, Interface };
+enum class PDB_UdtType { Struct, Class, Union, Interface, TaggedUnion };
 
 /// These values correspond to the StackFrameTypeEnum enumeration, and are
 /// documented here: https://msdn.microsoft.com/en-us/library/bc5207xw.aspx.

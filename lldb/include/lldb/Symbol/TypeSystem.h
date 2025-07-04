@@ -44,7 +44,8 @@ class DWARFASTParser;
 } // namespace plugin
 
 namespace npdb {
-  class PdbAstBuilder;
+class NativePDBASTParser;
+class PdbAstBuilder;
 } // namespace npdb
 
 /// Interface for representing a type system.
@@ -89,7 +90,7 @@ public:
   virtual plugin::dwarf::DWARFASTParser *GetDWARFParser() { return nullptr; }
 
   virtual PDBASTParser *GetPDBParser() { return nullptr; }
-  virtual npdb::PdbAstBuilder *GetNativePDBParser() { return nullptr; }
+  virtual npdb::NativePDBASTParser *GetNativePDBParser() { return nullptr; }
 
   virtual SymbolFile *GetSymbolFile() const { return m_sym_file; }
 
@@ -329,8 +330,7 @@ public:
 
   virtual void ForEachEnumerator(
       lldb::opaque_compiler_type_t type,
-      std::function<bool(const CompilerType &integer_type,
-                         ConstString name,
+      std::function<bool(const CompilerType &integer_type, ConstString name,
                          const llvm::APSInt &value)> const &callback) {}
 
   virtual uint32_t GetNumFields(lldb::opaque_compiler_type_t type) = 0;
@@ -539,6 +539,7 @@ public:
   bool GetHasForcefullyCompletedTypes() const {
     return m_has_forcefully_completed_types;
   }
+
 protected:
   SymbolFile *m_sym_file = nullptr;
   /// Used for reporting statistics.
@@ -569,6 +570,7 @@ public:
   /// Check all type systems in the map to see if any have forcefully completed
   /// types;
   bool GetHasForcefullyCompletedTypes() const;
+
 protected:
   typedef llvm::DenseMap<uint16_t, lldb::TypeSystemSP> collection;
   mutable std::mutex m_mutex; ///< A mutex to keep this object happy in
@@ -593,8 +595,8 @@ private:
   llvm::Expected<lldb::TypeSystemSP> GetTypeSystemForLanguage(
       lldb::LanguageType language,
       std::optional<CreateCallback> create_callback = std::nullopt);
-  };
+};
 
-  } // namespace lldb_private
+} // namespace lldb_private
 
 #endif // LLDB_SYMBOL_TYPESYSTEM_H

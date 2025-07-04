@@ -14,8 +14,8 @@
 #include "llvm/Support/FormatAdapters.h"
 #include "llvm/Support/FormatVariadic.h"
 
-#include <mutex>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -76,8 +76,9 @@
 
 #include "Plugins/LanguageRuntime/ObjC/ObjCLanguageRuntime.h"
 #include "Plugins/SymbolFile/DWARF/DWARFASTParserClang.h"
-#include "Plugins/SymbolFile/PDB/PDBASTParser.h"
 #include "Plugins/SymbolFile/NativePDB/PdbAstBuilder.h"
+#include "Plugins/SymbolFile/PDB/PDBASTParser.h"
+// #include "Plugins/SymbolFile/PDB/PDBASTParserClang.h"
 
 #include <cstdio>
 
@@ -89,7 +90,7 @@ using namespace lldb_private;
 using namespace lldb_private::dwarf;
 using namespace lldb_private::plugin::dwarf;
 using namespace clang;
-// using namespace llvm::dwarf;
+using namespace llvm::dwarf;
 using llvm::StringSwitch;
 
 LLDB_PLUGIN_DEFINE(TypeSystemClang)
@@ -114,6 +115,7 @@ TypeSystemClangSupportsLanguage(lldb::LanguageType language) {
          // Use Clang for Rust until there is a proper language plugin for it
          // Use Clang for D until there is a proper language plugin for it
          language == eLanguageTypeD ||
+         //  language == eLanguageTypeRust ||
          // Open Dylan compiler debug info is designed to be Clang-compatible
          language == eLanguageTypeDylan;
 }
@@ -196,7 +198,7 @@ void addOverridesForMethod(clang::CXXMethodDecl *decl) {
           llvm::cast<clang::CXXMethodDecl>(overridden_decl));
   }
 }
-}
+} // namespace
 
 static lldb::addr_t GetVTableAddress(Process &process,
                                      VTableContextBase &vtable_ctx,
@@ -572,6 +574,7 @@ LanguageSet TypeSystemClang::GetSupportedLanguagesForTypes() {
   languages.Insert(lldb::eLanguageTypeC_plus_plus_14);
   languages.Insert(lldb::eLanguageTypeC_plus_plus_17);
   languages.Insert(lldb::eLanguageTypeC_plus_plus_20);
+  // languages.Insert(lldb::eLanguageTypeRust);
   return languages;
 }
 
@@ -1149,7 +1152,7 @@ CompilerDeclContext TypeSystemClang::CreateDeclContext(DeclContext *ctx) {
 
 CompilerType TypeSystemClang::GetTypeForDecl(clang::NamedDecl *decl) {
   if (clang::ObjCInterfaceDecl *interface_decl =
-      llvm::dyn_cast<clang::ObjCInterfaceDecl>(decl))
+          llvm::dyn_cast<clang::ObjCInterfaceDecl>(decl))
     return GetTypeForDecl(interface_decl);
   if (clang::TagDecl *tag_decl = llvm::dyn_cast<clang::TagDecl>(decl))
     return GetTypeForDecl(tag_decl);
@@ -1946,14 +1949,13 @@ clang::UsingDirectiveDecl *TypeSystemClang::CreateUsingDirectiveDeclaration(
   if (decl_ctx && ns_decl) {
     auto *translation_unit = getASTContext().getTranslationUnitDecl();
     clang::UsingDirectiveDecl *using_decl = clang::UsingDirectiveDecl::Create(
-          getASTContext(), decl_ctx, clang::SourceLocation(),
-          clang::SourceLocation(), clang::NestedNameSpecifierLoc(),
-          clang::SourceLocation(), ns_decl,
-          FindLCABetweenDecls(decl_ctx, ns_decl,
-                              translation_unit));
-      decl_ctx->addDecl(using_decl);
-      SetOwningModule(using_decl, owning_module);
-      return using_decl;
+        getASTContext(), decl_ctx, clang::SourceLocation(),
+        clang::SourceLocation(), clang::NestedNameSpecifierLoc(),
+        clang::SourceLocation(), ns_decl,
+        FindLCABetweenDecls(decl_ctx, ns_decl, translation_unit));
+    decl_ctx->addDecl(using_decl);
+    SetOwningModule(using_decl, owning_module);
+    return using_decl;
   }
   return nullptr;
 }
@@ -3125,7 +3127,8 @@ TypeSystemClang::GetFunctionArgumentAtIndex(lldb::opaque_compiler_type_t type,
         llvm::dyn_cast<clang::FunctionProtoType>(qual_type.getTypePtr());
     if (func) {
       if (index < func->getNumParams())
-        return CompilerType(weak_from_this(), func->getParamType(index).getAsOpaquePtr());
+        return CompilerType(weak_from_this(),
+                            func->getParamType(index).getAsOpaquePtr());
     }
   }
   return CompilerType();
@@ -3150,7 +3153,8 @@ bool TypeSystemClang::IsTypeImpl(
       const clang::ReferenceType *reference_type =
           llvm::cast<clang::ReferenceType>(qual_type.getTypePtr());
       if (reference_type)
-        return IsTypeImpl(reference_type->getPointeeType().getAsOpaquePtr(), predicate);
+        return IsTypeImpl(reference_type->getPointeeType().getAsOpaquePtr(),
+                          predicate);
     } break;
     }
   }
@@ -3544,9 +3548,8 @@ bool TypeSystemClang::IsPossibleDynamicType(lldb::opaque_compiler_type_t type,
     const clang::Type::TypeClass type_class = qual_type->getTypeClass();
     switch (type_class) {
     case clang::Type::Builtin:
-      if (check_objc &&
-          llvm::cast<clang::BuiltinType>(qual_type)->getKind() ==
-              clang::BuiltinType::ObjCId) {
+      if (check_objc && llvm::cast<clang::BuiltinType>(qual_type)->getKind() ==
+                            clang::BuiltinType::ObjCId) {
         if (dynamic_pointee_type)
           dynamic_pointee_type->SetCompilerType(weak_from_this(), type);
         return true;
@@ -3684,8 +3687,7 @@ bool TypeSystemClang::IsVoidType(lldb::opaque_compiler_type_t type) {
 }
 
 bool TypeSystemClang::CanPassInRegisters(const CompilerType &type) {
-  if (auto *record_decl =
-      TypeSystemClang::GetAsRecordDecl(type)) {
+  if (auto *record_decl = TypeSystemClang::GetAsRecordDecl(type)) {
     return record_decl->canPassInRegisters();
   }
   return false;
@@ -4695,14 +4697,13 @@ CompilerType TypeSystemClang::GetBasicTypeFromAST(lldb::BasicType basic_type) {
 CompilerType TypeSystemClang::CreateGenericFunctionPrototype() {
   clang::ASTContext &ast = getASTContext();
   const FunctionType::ExtInfo generic_ext_info(
-    /*noReturn=*/false,
-    /*hasRegParm=*/false,
-    /*regParm=*/0,
-    CallingConv::CC_C,
-    /*producesResult=*/false,
-    /*noCallerSavedRegs=*/false,
-    /*NoCfCheck=*/false,
-    /*cmseNSCall=*/false);
+      /*noReturn=*/false,
+      /*hasRegParm=*/false,
+      /*regParm=*/0, CallingConv::CC_C,
+      /*producesResult=*/false,
+      /*noCallerSavedRegs=*/false,
+      /*NoCfCheck=*/false,
+      /*cmseNSCall=*/false);
   QualType func_type = ast.getFunctionNoProtoType(ast.VoidTy, generic_ext_info);
   return GetType(func_type);
 }
@@ -4979,7 +4980,8 @@ lldb::Encoding TypeSystemClang::GetEncoding(lldb::opaque_compiler_type_t type,
     case clang::BuiltinType::OCLIntelSubgroupAVCImeResult:
     case clang::BuiltinType::OCLIntelSubgroupAVCRefResult:
     case clang::BuiltinType::OCLIntelSubgroupAVCSicResult:
-    case clang::BuiltinType::OCLIntelSubgroupAVCImeResultSingleReferenceStreamout:
+    case clang::BuiltinType::
+        OCLIntelSubgroupAVCImeResultSingleReferenceStreamout:
     case clang::BuiltinType::OCLIntelSubgroupAVCImeResultDualReferenceStreamout:
     case clang::BuiltinType::OCLIntelSubgroupAVCImeSingleReferenceStreamin:
     case clang::BuiltinType::OCLIntelSubgroupAVCImeDualReferenceStreamin:
@@ -5045,7 +5047,7 @@ lldb::Encoding TypeSystemClang::GetEncoding(lldb::opaque_compiler_type_t type,
     case clang::BuiltinType::SveFloat64x4:
       break;
 
-    // RISC-V V builtin types.
+      // RISC-V V builtin types.
 #define RVV_TYPE(Name, Id, SingletonId) case clang::BuiltinType::Id:
 #include "clang/Basic/RISCVVTypes.def"
       break;
@@ -5060,7 +5062,7 @@ lldb::Encoding TypeSystemClang::GetEncoding(lldb::opaque_compiler_type_t type,
     case clang::BuiltinType::UnresolvedTemplate:
       break;
 
-    // AMD GPU builtin types.
+      // AMD GPU builtin types.
 #define AMDGPU_TYPE(Name, Id, SingletonId) case clang::BuiltinType::Id:
 #include "clang/Basic/AMDGPUTypes.def"
       break;
@@ -5388,8 +5390,8 @@ TypeSystemClang::GetNumChildren(lldb::opaque_compiler_type_t type,
           num_children += cxx_record_decl->getNumBases();
         }
       }
-      num_children += std::distance(record_decl->field_begin(),
-                               record_decl->field_end());
+      num_children +=
+          std::distance(record_decl->field_begin(), record_decl->field_end());
     } else
       return llvm::createStringError(
           "incomplete type \"" + GetDisplayTypeName(type).GetString() + "\"");
@@ -5570,8 +5572,7 @@ TypeSystemClang::GetBasicTypeEnumeration(lldb::opaque_compiler_type_t type) {
 
 void TypeSystemClang::ForEachEnumerator(
     lldb::opaque_compiler_type_t type,
-    std::function<bool(const CompilerType &integer_type,
-                       ConstString name,
+    std::function<bool(const CompilerType &integer_type, ConstString name,
                        const llvm::APSInt &value)> const &callback) {
   const clang::EnumType *enum_type =
       llvm::dyn_cast<clang::EnumType>(GetCanonicalQualType(type));
@@ -6639,10 +6640,10 @@ llvm::Expected<CompilerType> TypeSystemClang::GetChildCompilerTypeAtIndex(
   return CompilerType();
 }
 
-uint32_t TypeSystemClang::GetIndexForRecordBase(
-    const clang::RecordDecl *record_decl,
-    const clang::CXXBaseSpecifier *base_spec,
-    bool omit_empty_base_classes) {
+uint32_t
+TypeSystemClang::GetIndexForRecordBase(const clang::RecordDecl *record_decl,
+                                       const clang::CXXBaseSpecifier *base_spec,
+                                       bool omit_empty_base_classes) {
   uint32_t child_idx = 0;
 
   const clang::CXXRecordDecl *cxx_record_decl =
@@ -6667,9 +6668,10 @@ uint32_t TypeSystemClang::GetIndexForRecordBase(
   return UINT32_MAX;
 }
 
-uint32_t TypeSystemClang::GetIndexForRecordChild(
-    const clang::RecordDecl *record_decl, clang::NamedDecl *canonical_decl,
-    bool omit_empty_base_classes) {
+uint32_t
+TypeSystemClang::GetIndexForRecordChild(const clang::RecordDecl *record_decl,
+                                        clang::NamedDecl *canonical_decl,
+                                        bool omit_empty_base_classes) {
   uint32_t child_idx = TypeSystemClang::GetNumBaseClasses(
       llvm::dyn_cast<clang::CXXRecordDecl>(record_decl),
       omit_empty_base_classes);
@@ -6771,7 +6773,7 @@ size_t TypeSystemClang::GetIndexOfChildMemberWithName(
                   [decl_name](const clang::CXXBaseSpecifier *specifier,
                               clang::CXXBasePath &path) {
                     CXXRecordDecl *record =
-                      specifier->getType()->getAsCXXRecordDecl();
+                        specifier->getType()->getAsCXXRecordDecl();
                     auto r = record->lookup(decl_name);
                     path.Decls = r.begin();
                     return !r.empty();
@@ -6799,8 +6801,8 @@ size_t TypeSystemClang::GetIndexOfChildMemberWithName(
               }
               for (clang::DeclContext::lookup_iterator I = path->Decls, E;
                    I != E; ++I) {
-                child_idx = GetIndexForRecordChild(
-                    parent_record_decl, *I, omit_empty_base_classes);
+                child_idx = GetIndexForRecordChild(parent_record_decl, *I,
+                                                   omit_empty_base_classes);
                 if (child_idx == UINT32_MAX) {
                   child_indexes.clear();
                   return 0;
@@ -7239,7 +7241,7 @@ TypeSystemClang::GetAsTemplateSpecialization(
   const clang::Type::TypeClass type_class = qual_type->getTypeClass();
   switch (type_class) {
   case clang::Type::Record: {
-    if (! GetCompleteType(type))
+    if (!GetCompleteType(type))
       return nullptr;
     const clang::CXXRecordDecl *cxx_record_decl =
         qual_type->getAsCXXRecordDecl();
@@ -7364,7 +7366,8 @@ TypeSystemClang::GetIntegralTemplateArgument(lldb::opaque_compiler_type_t type,
 
 CompilerType TypeSystemClang::GetTypeForFormatters(void *type) {
   if (type)
-    return ClangUtil::RemoveFastQualifiers(CompilerType(weak_from_this(), type));
+    return ClangUtil::RemoveFastQualifiers(
+        CompilerType(weak_from_this(), type));
   return CompilerType();
 }
 
@@ -8099,7 +8102,8 @@ bool TypeSystemClang::AddObjCClassProperty(
     getter =
         clang::ObjCMethodDecl::CreateDeserialized(clang_ast, GlobalDeclID());
     getter->setDeclName(getter_sel);
-    getter->setReturnType(ClangUtil::GetQualType(property_clang_type_to_access));
+    getter->setReturnType(
+        ClangUtil::GetQualType(property_clang_type_to_access));
     getter->setDeclContext(class_interface_decl);
     getter->setInstanceMethod(isInstance);
     getter->setVariadic(isVariadic);
@@ -8126,8 +8130,8 @@ bool TypeSystemClang::AddObjCClassProperty(
   }
 
   clang::ObjCMethodDecl *setter = nullptr;
-    setter = isInstance ? class_interface_decl->lookupInstanceMethod(setter_sel)
-                        : class_interface_decl->lookupClassMethod(setter_sel);
+  setter = isInstance ? class_interface_decl->lookupInstanceMethod(setter_sel)
+                      : class_interface_decl->lookupClassMethod(setter_sel);
   if (!setter_sel.isNull() && !setter) {
     clang::QualType result_type = clang_ast.VoidTy;
     const bool isVariadic = false;
@@ -8748,8 +8752,9 @@ bool TypeSystemClang::DumpTypeValue(
 
     if (type_class == clang::Type::Elaborated) {
       qual_type = llvm::cast<clang::ElaboratedType>(qual_type)->getNamedType();
-      return DumpTypeValue(qual_type.getAsOpaquePtr(), s, format, data, byte_offset, byte_size,
-                           bitfield_bit_size, bitfield_bit_offset, exe_scope);
+      return DumpTypeValue(qual_type.getAsOpaquePtr(), s, format, data,
+                           byte_offset, byte_size, bitfield_bit_size,
+                           bitfield_bit_offset, exe_scope);
     }
 
     switch (type_class) {
@@ -8891,7 +8896,7 @@ void TypeSystemClang::DumpTypeDescription(lldb::opaque_compiler_type_t type,
       if (!objc_class_type)
         break;
       clang::ObjCInterfaceDecl *class_interface_decl =
-            objc_class_type->getInterface();
+          objc_class_type->getInterface();
       if (!class_interface_decl)
         break;
       if (level == eDescriptionLevelVerbose)
@@ -8955,7 +8960,7 @@ void TypeSystemClang::DumpTypeDescription(lldb::opaque_compiler_type_t type,
     if (buf.size() > 0) {
       s.Write(buf.data(), buf.size());
     }
-}
+  }
 }
 
 void TypeSystemClang::DumpTypeName(const CompilerType &type) {
@@ -9078,7 +9083,13 @@ PDBASTParser *TypeSystemClang::GetPDBParser() {
   return m_pdb_ast_parser_up.get();
 }
 
-npdb::PdbAstBuilder *TypeSystemClang::GetNativePDBParser() {
+npdb::NativePDBASTParser *TypeSystemClang::GetNativePDBParser() {
+  if (!m_native_pdb_ast_parser_up)
+    m_native_pdb_ast_parser_up = std::make_unique<npdb::PdbAstBuilder>(*this);
+  return m_native_pdb_ast_parser_up.get();
+}
+
+npdb::PdbAstBuilder *TypeSystemClang::GetPdbAstBuilder() {
   if (!m_native_pdb_ast_parser_up)
     m_native_pdb_ast_parser_up = std::make_unique<npdb::PdbAstBuilder>(*this);
   return m_native_pdb_ast_parser_up.get();
@@ -9287,8 +9298,7 @@ std::vector<CompilerDecl> TypeSystemClang::DeclContextFindDeclByName(
            it++) {
         if (!searched.insert(it->second).second)
           continue;
-        symbol_file->ParseDeclsForContext(
-            CreateDeclContext(it->second));
+        symbol_file->ParseDeclsForContext(CreateDeclContext(it->second));
 
         for (clang::Decl *child : it->second->decls()) {
           if (clang::UsingDirectiveDecl *ud =
@@ -9401,8 +9411,7 @@ uint32_t TypeSystemClang::CountDeclLevels(clang::DeclContext *frame_decl_ctx,
           continue;
 
         searched.insert(it->second);
-        symbol_file->ParseDeclsForContext(
-            CreateDeclContext(it->second));
+        symbol_file->ParseDeclsForContext(CreateDeclContext(it->second));
 
         for (clang::Decl *child : it->second->decls()) {
           if (clang::UsingDirectiveDecl *ud =

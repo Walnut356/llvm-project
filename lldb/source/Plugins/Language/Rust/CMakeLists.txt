@@ -1,11 +1,11 @@
 add_lldb_library(lldbPluginRustLanguage PLUGIN
+  Utils.cpp
   RustLanguage.cpp
   Slice.cpp
   Str.cpp
   Vec.cpp
   String.cpp
   SumType.cpp
-  Utils.cpp
 
   LINK_LIBS
     lldbCore
