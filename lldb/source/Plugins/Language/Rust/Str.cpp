@@ -6,20 +6,22 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "RustStdLib.h"
+
+#include "Utils.h"
 #include "lldb/Core/ValueObject.h"
 #include "lldb/DataFormatters/FormattersHelpers.h"
 #include "lldb/DataFormatters/TypeSynthetic.h"
 #include "lldb/Utility/ConstString.h"
 #include "lldb/lldb-enumerations.h"
 #include "lldb/lldb-forward.h"
-#include "Utils.h"
+
 
 using namespace lldb;
 using namespace lldb_private;
 using namespace lldb_private::formatters;
 
-namespace lldb_private {
-namespace formatters {
+namespace {
 class StrSyntheticFrontEnd : public SyntheticChildrenFrontEnd {
 public:
   StrSyntheticFrontEnd(ValueObjectSP valobj_sp);
@@ -38,9 +40,12 @@ public:
   size_t GetIndexOfChildWithName(ConstString name) override;
 
   static TypeSummaryImplSP summary;
+
+  std::vector<uint8_t> buffer;
   ValueObject* data_ptr;
   uint64_t len;
 };
+} // namespace
 
 TypeSummaryImplSP StrSyntheticFrontEnd::summary =
     CXXFunctionSummaryFormat::SharedPointer(new CXXFunctionSummaryFormat(
@@ -63,7 +68,15 @@ ChildCacheState StrSyntheticFrontEnd::Update() {
   len = m_backend.GetChildMemberWithName("length")->GetValueAsUnsigned(0);
   data_ptr = m_backend.GetChildMemberWithName("data_ptr").get();
 
-  return ChildCacheState::eRefetch;
+    if (len > 0) {
+    buffer.resize(len);
+    auto process = data_ptr->GetProcessSP();
+
+    Status err = Status();
+    process->ReadMemory(data_ptr->GetPointerValue(), buffer.data(), len, err);
+  }
+
+  return ChildCacheState::eReuse;
 }
 
 ValueObjectSP StrSyntheticFrontEnd::GetChildAtIndex(uint32_t idx) {
@@ -71,21 +84,30 @@ ValueObjectSP StrSyntheticFrontEnd::GetChildAtIndex(uint32_t idx) {
     return ValueObjectSP();
   }
 
-  uint64_t offset = idx + data_ptr->GetPointerValue();
-
   StreamString name;
   name.Printf("[%" PRIu64 "]", (uint64_t)idx);
 
-  auto val = CreateValueObjectFromAddress(
+  DataExtractor d = DataExtractor(
+      &buffer[idx],
+      1,
+      lldb::eByteOrderLittle,
+      data_ptr->GetByteSize().value_or(8)
+  );
+
+  
+
+  auto child = CreateValueObjectFromData(
       name.GetString(),
-      offset,
+      d,
       m_backend.GetExecutionContextRef(),
       data_ptr->GetCompilerType().GetPointeeType()
   );
 
-  val->SetFormat(lldb::eFormatCharPrintable);
+  child->SetFormat(eFormatCharPrintable);
 
-  return val;
+  // child->SetSummaryFormat(StringSyntheticFrontEnd::summary);
+
+  return child;
 }
 
 size_t StrSyntheticFrontEnd::GetIndexOfChildWithName(ConstString name) {
@@ -96,7 +118,7 @@ size_t StrSyntheticFrontEnd::GetIndexOfChildWithName(ConstString name) {
   return ExtractIndexFromString(name.GetCString());
 }
 
-static SyntheticChildrenFrontEnd* RustStrSyntheticFrontEndCreator(
+SyntheticChildrenFrontEnd* formatters::RustStrSyntheticFrontEndCreator(
     CXXSyntheticChildren*,
     lldb::ValueObjectSP valobj_sp
 ) {
@@ -108,7 +130,7 @@ static SyntheticChildrenFrontEnd* RustStrSyntheticFrontEndCreator(
   return new StrSyntheticFrontEnd(valobj_sp);
 }
 
-static bool RustStrSummary(
+bool formatters::RustStrSummary(
     ValueObject& valobj,
     Stream& stream,
     const TypeSummaryOptions& summary_options
@@ -120,12 +142,14 @@ static bool RustStrSummary(
 
   stream.PutChar('"');
   for (unsigned int i = 0; i < size; ++i) {
-    stream.PutChar(valobj.GetChildAtIndex(i)->GetValueAsUnsigned(0));
+    auto child = valobj.GetChildAtIndex(i);
+    if (child) {
+      stream.PutChar(child->GetValueAsUnsigned(0));
+    } else {
+      stream.PutCString("<?>");
+    }
   }
   stream.PutChar('"');
 
   return true;
 }
-
-} // namespace formatters
-} // namespace lldb_private

@@ -9,13 +9,10 @@
 
 // C Includes
 #include <memory>
-#include <string.h>
 // C++ Includes
 #include <functional>
-#include <mutex>
 
 // Other libraries and framework includes
-#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Threading.h"
 
@@ -26,15 +23,10 @@
 #include "lldb/DataFormatters/DataVisualization.h"
 #include "lldb/DataFormatters/FormattersHelpers.h"
 #include "lldb/DataFormatters/TypeSummary.h"
-#include "lldb/Expression/UtilityFunction.h"
 #include "lldb/Utility/ConstString.h"
 #include "lldb/lldb-enumerations.h"
 
-#include "Slice.cpp"
-#include "Str.cpp"
-#include "String.cpp"
-#include "SumType.cpp"
-#include "Vec.cpp"
+#include "RustStdLib.h"
 #include "lldb/lldb-forward.h"
 
 using namespace lldb;
@@ -211,6 +203,34 @@ lldb::TypeCategoryImplSP RustLanguage::GetFormatters() {
               .SetFrontEndWantsDereference(),
           true
       );
+
+      // -------------------------- HashMap/HashSet ------------------------- //
+
+      AddCXXSynthetic(
+          g_category,
+          RustHashMapSyntheticFrontEndCreator,
+          "built-in HashMap<K,V>/HashSet<K> synthetic provider",
+          "^(std::collections::([a-z_]+::)+)HashMap<.+>$",
+          ScriptedSyntheticChildren::Flags()
+              .SetCascades()
+              .SetSkipPointers(false)
+              .SetSkipReferences(false)
+              .SetFrontEndWantsDereference(),
+          true
+      );
+      // TODO fix this
+      // AddCXXSynthetic(
+      //     g_category,
+      //     RustHashMapSyntheticFrontEndCreator,
+      //     "built-in HashMap<K,V>/HashSet<K> synthetic provider",
+      //     "^(std::collections::([a-z_]+::)+)HashSet<.+>$",
+      //     ScriptedSyntheticChildren::Flags()
+      //         .SetCascades()
+      //         .SetSkipPointers(false)
+      //         .SetSkipReferences(false)
+      //         .SetFrontEndWantsDereference(),
+      //     true
+      // );
 
       // -------------------------------------------------------------------- //
       //                               Summaries                              //

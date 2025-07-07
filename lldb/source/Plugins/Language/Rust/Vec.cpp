@@ -6,6 +6,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "RustStdLib.h"
+
 #include "lldb/Core/ValueObject.h"
 #include "lldb/DataFormatters/FormattersHelpers.h"
 #include "lldb/DataFormatters/TypeSynthetic.h"
@@ -18,8 +20,7 @@ using namespace lldb;
 using namespace lldb_private;
 using namespace lldb_private::formatters;
 
-namespace lldb_private {
-namespace formatters {
+namespace {
 class VecSyntheticFrontEnd : public SyntheticChildrenFrontEnd {
 public:
   VecSyntheticFrontEnd(ValueObjectSP valobj_sp);
@@ -44,6 +45,7 @@ public:
   uint32_t element_size;
   ConstString element_name;
 };
+} // namespace
 
 VecSyntheticFrontEnd::VecSyntheticFrontEnd(ValueObjectSP valobj_sp)
     : SyntheticChildrenFrontEnd(*valobj_sp), element_type() {
@@ -113,7 +115,7 @@ size_t VecSyntheticFrontEnd::GetIndexOfChildWithName(ConstString name) {
   return ExtractIndexFromString(name.GetCString());
 }
 
-static SyntheticChildrenFrontEnd* RustVecSyntheticFrontEndCreator(
+SyntheticChildrenFrontEnd* formatters::RustVecSyntheticFrontEndCreator(
     CXXSyntheticChildren*,
     lldb::ValueObjectSP valobj_sp
 ) {
@@ -124,6 +126,3 @@ static SyntheticChildrenFrontEnd* RustVecSyntheticFrontEndCreator(
     return nullptr;
   return new VecSyntheticFrontEnd(valobj_sp);
 }
-
-} // namespace formatters
-} // namespace lldb_private

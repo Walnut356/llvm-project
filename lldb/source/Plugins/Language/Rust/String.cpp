@@ -6,6 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "RustStdLib.h"
 #include "Utils.h"
 #include "lldb/Core/ValueObject.h"
 #include "lldb/Core/ValueObjectSyntheticFilter.h"
@@ -16,12 +17,11 @@
 #include "lldb/lldb-forward.h"
 #include <optional>
 
+
 using namespace lldb;
 using namespace lldb_private;
-using namespace lldb_private::formatters;
 
-namespace lldb_private {
-namespace formatters {
+namespace {
 
 // String is just a wrapper around a Vec. While it could just delegate to the
 // internal `Vec`, that's significantly slower than just replicating the vec's
@@ -51,6 +51,7 @@ public:
   uint64_t len;
   CompilerType element_type;
 };
+} // namespace
 
 TypeSummaryImplSP StringSyntheticFrontEnd::summary =
     CXXFunctionSummaryFormat::SharedPointer(new CXXFunctionSummaryFormat(
@@ -97,7 +98,7 @@ ChildCacheState StringSyntheticFrontEnd::Update() {
 }
 
 ValueObjectSP StringSyntheticFrontEnd::GetChildAtIndex(uint32_t idx) {
-  if (!data_ptr || !element_type || idx > buffer.size()) {
+  if (!data_ptr || !element_type || idx >= buffer.size()) {
     return ValueObjectSP();
   }
 
@@ -120,7 +121,7 @@ ValueObjectSP StringSyntheticFrontEnd::GetChildAtIndex(uint32_t idx) {
 
   child->SetFormat(eFormatCharPrintable);
 
-  child->SetSummaryFormat(StringSyntheticFrontEnd::summary);
+  // child->SetSummaryFormat(StringSyntheticFrontEnd::summary);
 
   return child;
 }
@@ -130,12 +131,13 @@ size_t StringSyntheticFrontEnd::GetIndexOfChildWithName(ConstString name) {
     return UINT32_MAX;
   }
 
-  auto idx = ExtractIndexFromString(name.GetCString());
+  auto idx =
+      lldb_private::formatters::ExtractIndexFromString(name.GetCString());
 
   return idx;
 }
 
-static SyntheticChildrenFrontEnd* RustStringSyntheticFrontEndCreator(
+SyntheticChildrenFrontEnd* formatters::RustStringSyntheticFrontEndCreator(
     CXXSyntheticChildren*,
     lldb::ValueObjectSP valobj_sp
 ) {
@@ -147,7 +149,7 @@ static SyntheticChildrenFrontEnd* RustStringSyntheticFrontEndCreator(
   return new StringSyntheticFrontEnd(valobj_sp);
 }
 
-static bool RustStringSummary(
+bool formatters::RustStringSummary(
     ValueObject& valobj,
     Stream& stream,
     const TypeSummaryOptions& summary_options
@@ -171,6 +173,3 @@ static bool RustStringSummary(
 
   return true;
 }
-
-} // namespace formatters
-} // namespace lldb_private

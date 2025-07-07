@@ -6,6 +6,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "RustStdLib.h"
+
 #include "lldb/Core/ValueObject.h"
 #include "lldb/DataFormatters/FormattersHelpers.h"
 #include "lldb/DataFormatters/TypeSynthetic.h"
@@ -18,8 +20,7 @@ using namespace lldb;
 using namespace lldb_private;
 using namespace lldb_private::formatters;
 
-namespace lldb_private {
-namespace formatters {
+namespace {
 class SliceSyntheticFrontEnd : public SyntheticChildrenFrontEnd {
 public:
   SliceSyntheticFrontEnd(ValueObjectSP valobj_sp);
@@ -44,6 +45,7 @@ public:
   uint32_t element_size;
   ConstString element_name;
 };
+} // namespace
 
 SliceSyntheticFrontEnd::SliceSyntheticFrontEnd(ValueObjectSP valobj_sp)
     : SyntheticChildrenFrontEnd(*valobj_sp), element_type() {
@@ -91,7 +93,7 @@ size_t SliceSyntheticFrontEnd::GetIndexOfChildWithName(ConstString name) {
   return ExtractIndexFromString(name.GetCString());
 }
 
-static SyntheticChildrenFrontEnd* RustSliceSyntheticFrontEndCreator(
+SyntheticChildrenFrontEnd* formatters::RustSliceSyntheticFrontEndCreator(
     CXXSyntheticChildren*,
     lldb::ValueObjectSP valobj_sp
 ) {
@@ -102,6 +104,3 @@ static SyntheticChildrenFrontEnd* RustSliceSyntheticFrontEndCreator(
     return nullptr;
   return new SliceSyntheticFrontEnd(valobj_sp);
 }
-
-} // namespace formatters
-} // namespace lldb_private

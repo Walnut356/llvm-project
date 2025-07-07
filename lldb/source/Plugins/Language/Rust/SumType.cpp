@@ -7,7 +7,10 @@
 //===----------------------------------------------------------------------===//
 
 #include "Plugins/TypeSystem/Rust/TypeSystemRust.h"
+#include "RustStdLib.h"
+
 #include "Utils.h"
+
 #include "lldb/Core/FormatEntity.h"
 #include "lldb/Core/ValueObject.h"
 #include "lldb/DataFormatters/DumpValueObjectOptions.h"
@@ -23,8 +26,7 @@
 using namespace lldb;
 using namespace lldb_private;
 
-namespace lldb_private {
-namespace formatters {
+namespace {
 class SumTypeSyntheticFrontEnd : public SyntheticChildrenFrontEnd {
 public:
   SumTypeSyntheticFrontEnd(ValueObjectSP valobj_sp);
@@ -43,6 +45,7 @@ public:
 
   ValueObject* variant;
 };
+} // namespace
 
 SumTypeSyntheticFrontEnd::SumTypeSyntheticFrontEnd(ValueObjectSP valobj_sp)
     : SyntheticChildrenFrontEnd(*valobj_sp) {
@@ -98,10 +101,7 @@ size_t SumTypeSyntheticFrontEnd::GetIndexOfChildWithName(ConstString name) {
   return variant->GetIndexOfChildWithName(name);
 }
 
-} // namespace formatters
-} // namespace lldb_private
-
-SyntheticChildrenFrontEnd* RustSumTypeSyntheticFrontEndCreator(
+SyntheticChildrenFrontEnd* formatters::RustSumTypeSyntheticFrontEndCreator(
     CXXSyntheticChildren*,
     lldb::ValueObjectSP valobj_sp
 ) {
@@ -117,10 +117,10 @@ SyntheticChildrenFrontEnd* RustSumTypeSyntheticFrontEndCreator(
     return nullptr;
   }
 
-  return new lldb_private::formatters::SumTypeSyntheticFrontEnd(valobj_sp);
+  return new SumTypeSyntheticFrontEnd(valobj_sp);
 }
 
-static bool RustSumTypeSummary(
+bool formatters::RustSumTypeSummary(
     ValueObject& valobj,
     Stream& stream,
     const TypeSummaryOptions& summary_options

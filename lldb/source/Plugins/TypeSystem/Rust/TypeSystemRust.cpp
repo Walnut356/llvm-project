@@ -85,12 +85,6 @@ using namespace lldb_private::npdb;
 LLDB_PLUGIN_DEFINE(TypeSystemRust)
 
 namespace lldb_private {
-// TODO maybe these don't work?
-
-// void RustDeclContext::AddItem(std::shared_ptr<RustDeclBase>&& item) {
-//   ConstString name = item->Name();
-//   child_decls[name] = std::move(item);
-// }
 
 /// Returns a pair containing the root name of the type, and the template args
 /// of that type.
@@ -122,11 +116,28 @@ GetTemplateArgs(llvm::StringRef name) {
   std::vector<llvm::StringRef> arg_vec{};
   uint32_t len = args.size();
   uint32_t start = 0;
+  uint32_t depth = 0;
 
   for (uint32_t i = 0; i < len; ++i) {
-    if (args[i] == ',') {
-      arg_vec.push_back(args.substr(start, i).trim());
-      start = i + 1;
+    switch (args[i]) {
+    case ',':
+      if (depth == 0) {
+        arg_vec.push_back(args.substr(start, i - start).trim());
+        start = i + 1;
+      }
+      break;
+    case '<':
+    // also account for tuples
+    case '(':
+      depth += 1;
+      break;
+    case '>':
+    // also account for tuples
+    case ')':
+      depth -= 1;
+      break;
+    default:
+      break;
     }
   }
 
@@ -139,111 +150,6 @@ GetTemplateArgs(llvm::StringRef name) {
 
   return {root_name, arg_vec};
 }
-
-/// Fixes type name output of MSVC-specific entities (e.g. `tuple$<u8, u16>` ->
-/// `(u8, u16)`, `ref$<slice2$<i32> >` -> `&[i32]`). This transformation is done
-/// recursively, so all generics within the type name will also be normalized.
-///
-/// The names that need to be normalized can be found in the rust repo under
-/// `compiler/rust_codegen_ssa/src/debuginfo/type_names.rs`
-// ConstString NormalizeMsvcTypeName(llvm::StringRef type_name) {
-//   const std::array<ConstString, 14> NAMES = {
-//       ConstString("str$"),
-//       ConstString("never$"),
-//       ConstString("tuple$"),
-//       ConstString("ptr_const$"),
-//       ConstString("ptr_mut$"),
-//       ConstString("ref$"),
-//       ConstString("ref_mut$"),
-//       ConstString("array$"),
-//       ConstString("pat$"),
-//       ConstString("slice2$"),
-//       ConstString("dyn$"),
-//       ConstString("assoc$"),
-//       ConstString("recursive_type$"),
-//       ConstString("enum2$")
-//       // also "return_type (*)()" for functions, but that needs unique
-//       handling
-//   };
-
-//   auto [root, args] = GetTemplateArgs(type_name);
-
-//   std::string arg_string = {};
-
-//   for (auto arg : args) {
-//     arg_string.append(NormalizeMsvcTypeName(arg).AsCString());
-//     arg_string.push_back(',');
-//   }
-
-//   // remove the potential trailing comma
-//   if (args.size() != 0) {
-//     arg_string.pop_back();
-//   }
-
-//   for (int i = 0; i < 14; ++i) {
-//     if (NAMES[i] == root) {
-//       switch (i) {
-//       case 0: { // str$
-//         return ConstString(root.substr(0, root.size() - 1));
-//       }
-//       case 1: { // never$
-//         return ConstString("!");
-//       }
-//       case 2: { // tuple$
-//         return ConstString(llvm::formatv("({0})", arg_string).str());
-//       }
-//       case 3: { // ptr_const$
-//         return ConstString(llvm::formatv("*const {0}", arg_string).str());
-//       }
-//       case 4: { // ptr_mut$
-//         return ConstString(llvm::formatv("*mut {0}", arg_string).str());
-//       }
-//       case 5: { // ref$
-//         return ConstString(llvm::formatv("&{0}", arg_string).str());
-//       }
-//       case 6: { // ref_mut$
-//         return ConstString(llvm::formatv("&mut {0}", arg_string).str());
-//       }
-//       case 7: { // array$
-//         // this should never fail since arrays will always have at 2
-//         top-level
-//         // generics, the second of which must be a number (thus contains no
-//         // comma).
-//         auto last_comma = arg_string.rfind(',');
-//         arg_string[last_comma] = ';';
-
-//         return ConstString(llvm::formatv("[{0}]", arg_string).str());
-//       }
-//       case 8: { // pat$ TODO
-//         return ConstString(type_name);
-//       }
-//       case 9: { // slice2$
-//         // similar to array formatting but has no length value. They're
-//         // typically wrapped in a `ref$` or `ref_mut$`, which the recursion
-//         // should handle
-//         return ConstString(llvm::formatv("[{0}]", arg_string).str());
-//       }
-//       case 10:   // dyn$ TODO
-//       case 11:   // assoc$ TODO
-//       case 12: { // recursive_type$ TODO
-//         return ConstString(type_name);
-//       }
-//       case 13: { // enum2$
-//         return ConstString(arg_string);
-//       }
-//       default:
-//         // unreachable
-//         assert(0);
-//       }
-//     }
-//   }
-
-//   if (args.size() == 0) {
-//     return ConstString(type_name);
-//   }
-
-//   return ConstString(llvm::formatv("{0}<{1}>", root, arg_string).str());
-// }
 
 // -------------------------------------------------------------------------- //
 //                                 Bookkeeping                                //
@@ -4189,6 +4095,10 @@ TypeSP TypeSystemRust::ParseAggregateTypePDB(
 
   auto name = ConstString(record.getName());
 
+  // if (name.GetStringRef().contains("HashMap")) {
+  //   printf("here");
+  // }
+
   auto name_ref = name.GetStringRef();
 
   CompilerType compiler_type;
@@ -4206,14 +4116,6 @@ TypeSP TypeSystemRust::ParseAggregateTypePDB(
 
     if (name_ref.starts_with("tuple$<")) {
       agg_kind = AggregateKind::Tuple;
-      // auto new_name = name.GetStringRef().substr(7);
-      // if (new_name.ends_with(" >")) {
-      //   new_name = new_name.substr(0, new_name.size() - 2);
-      // } else {
-      //   new_name = new_name.substr(0, new_name.size() - 1);
-      // }
-
-      // name = ConstString(llvm::formatv("({0})", new_name).str());
     } else {
       if (record.Kind == llvm::codeview::TypeRecordKind::Union) {
         agg_kind = AggregateKind::Union;
@@ -4260,30 +4162,28 @@ TypeSP TypeSystemRust::ParseAggregateTypePDB(
     // for tuples/tuple structs we normalize the name here (e.g. `__0` -> `0`)
     // so that the visualizers don't have to do it. This saves us from needing
     // to make synthetics for types that otherwise wouldn't need one, or do the
-    // same string processing multiple times later
+    // same string processing multiple times later.
+
+    // we also populate the template args since we know that each of the fields
+    // corresponds to one
     if (agg->kind == AggregateKind::TupleStruct ||
         agg->kind == AggregateKind::Tuple) {
       for (auto& f : agg->fields) {
         f.name = ConstString(f.name.GetStringRef().substr(2));
+        agg->template_args.push_back(
+            {static_cast<RustType*>(f.underlying_type.GetOpaqueQualType())
+                 ->m_name,
+             f.underlying_type}
+        );
       }
-    }
+    } else {
+      // If it's not a tuple, just populate the template arg name for now, and
+      // the type will be populated on demand later
+      auto [_, args] = GetTemplateArgs(name);
+      for (auto& t : args) {
 
-    auto [_, args] = GetTemplateArgs(name);
-    for (auto& t : args) {
-      // TypeResults results{};
-      // TypeQuery query = TypeQuery(t);
-      // query.SetFindOne(true);
-      // query.AddLanguage(eLanguageTypeRust);
-      // // query.SetLanguages(LanguageSet().Insert(lldb::LanguageType
-      // language)) GetSymbolFile()->FindTypes(query, results); if (auto r =
-      // results.GetFirstType()) {
-      //   agg->template_args.push_back(std::make_pair(t,
-      //   r->GetFullCompilerType())
-      //   );
-      // } else {
-
-      agg->template_args.push_back(std::make_pair(t, std::nullopt));
-      // }
+        agg->template_args.push_back(std::make_pair(t, std::nullopt));
+      }
     }
 
     compiler_type = CompilerType(weak_from_this(), rt);
@@ -4604,61 +4504,6 @@ CompilerType TypeSystemRust::ParseSumTypePDB(
                 v_aggregate->static_fields.at(0).second.GetOpaqueQualType()
             )
                 ->AsCStyleEnum();
-
-        // TODO we manually grab the Names enum type here until the struct
-        // parsing handles static types correctly
-        // field_data.getType();
-        // CVType variant_cvt = index.tpi().getType(
-        //     GetBestPossibleDecl(field_data.getType(), index.tpi()).index
-        // );
-        // CVTagRecord tag = CVTagRecord::create(variant_cvt);
-        // auto field_list = index.tpi().getType(tag.asClass().getFieldList());
-
-        // auto reader = llvm::BinaryStreamReader(
-        //     field_list.data(),
-        //     llvm::endianness::little
-        // );
-        // auto field_iter = FieldListDeserializer(reader);
-
-        // bool cont = true;
-        // while (cont) {
-        //   CVMemberRecord member;
-
-        //   if (auto e = reader.readEnum(member.Kind)) {
-        //     consumeError(std::move(e));
-        //     break;
-        //   }
-        //   if (auto e = field_iter.visitMemberBegin(member)) {
-        //     consumeError(std::move(e));
-        //     break;
-        //   }
-        //   switch (member.Kind) {
-        //   case LF_STMEMBER: {
-        //     StaticDataMemberRecord field_data;
-        //     if (auto e = field_iter.visitKnownMember(member, field_data)) {
-        //       consumeError(std::move(e));
-        //       cont = false;
-        //       break;
-        //     }
-
-        //     TypeSP t = ParseTypeFromPDB(PdbTypeSymId(field_data.getType()));
-        //     CompilerType ct = t->GetFullCompilerType();
-        //     auto* rt = static_cast<RustType*>(ct.GetOpaqueQualType());
-        //     if (rt->IsCStyleEnum()) {
-        //       v_name_enum = static_cast<RustType*>(ct.GetOpaqueQualType())
-        //                         ->AsCStyleEnum();
-        //     } else {
-        //       discr_128 = rt->m_name.GetStringRef()[5] == '1';
-        //     }
-        //   } break;
-        //   default:
-        //     break;
-        //   }
-
-        //   if (auto e = field_iter.visitMemberEnd(member)) {
-        //     break;
-        //   }
-        // }
 
         // TODO I rely on this field ordering, but i'm not sure if it's
         // actually guaranteed.
@@ -5692,13 +5537,6 @@ ConstString TypeSystemRust::NormalizeMSVCTypeName(llvm::StringRef name) {
 
   name = name.trim();
 
-  // if (kind != NameKind::Bare) {
-  //   if (name.ends_with(" >")) {
-  //     name = name.substr(0, name.size() - 2);
-  //   } else if (name.ends_with(">")) {
-  //     name = name.substr(0, name.size() - 1);
-  //   }
-  // }
   if (kind != NameKind::Bare) {
     name = NormalizeMSVCTypeName(name);
   }
@@ -5775,8 +5613,6 @@ ConstString TypeSystemRust::NormalizeMSVCTypeName(llvm::StringRef name) {
 
   auto result = ConstString(normalized);
 
-  // printf("Raw: %s | ", temp.c_str());
-  // printf("Normalized: %s\n", result.AsCString());
   msvc_normalization_cache[original] = result;
 
   return result;
